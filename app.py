@@ -206,7 +206,7 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
 
     response = client.chat.completions.create(
         model="gpt-5.5-2026-04-23",   # <-- UPDATE THIS to latest model string
-        max_tokens=1500,
+        max_completion_tokens=1500,
         messages=[
             {
                 "role": "user",
