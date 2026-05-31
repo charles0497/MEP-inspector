@@ -86,43 +86,54 @@ with st.sidebar:
         )
 
 # ---------------------------------------------------------------------------
-# Zone definitions — three horizontal content bands
-#
-# Based on observed site photograph layouts:
-#   Cable Tray Zone    — top 35% of image (ceiling, trays, overhead cables)
-#   Panel Zone         — middle 40% of image (distribution panels, switchboards)
-#   Floor/Clear Zone   — bottom 25% of image (floor, working clearance, loose items)
-#
-# Each zone is assessed only against criteria relevant to what it contains.
-# This eliminates CANNOT DETERMINE responses caused by asking the wrong
-# criteria in the wrong area of the image.
+# Colour scheme for severity levels
 # ---------------------------------------------------------------------------
-ZONE_BANDS = {
-    "Cable Tray Zone":         (0.00, 0.35),   # top 35%
-    "Panel Zone":              (0.35, 0.75),   # middle 40%
-    "Floor / Clearance Zone":  (0.75, 1.00),   # bottom 25%
+SEVERITY_FILL = {
+    "PASS":            (0,   200,   0,  60),
+    "FLAG FOR REVIEW": (255, 165,   0,  60),
+    "FAIL":            (220,   0,   0,  60),
+    "CANNOT DETERMINE":(150, 150, 150,  40),
+}
+SEVERITY_BORDER = {
+    "PASS":            (0,   160,   0, 230),
+    "FLAG FOR REVIEW": (210, 130,   0, 230),
+    "FAIL":            (180,   0,   0, 230),
+    "CANNOT DETERMINE":(120, 120, 120, 200),
+}
+SEVERITY_TEXT = {
+    "PASS":            (0,   110,   0),
+    "FLAG FOR REVIEW": (150,  90,   0),
+    "FAIL":            (150,   0,   0),
+    "CANNOT DETERMINE":( 80,  80,  80),
 }
 
 # ---------------------------------------------------------------------------
-# Inspection prompts — three-band content-based zoning
+# Inspection prompts — element-based bounding box detection
+#
+# GPT-5.5 is asked to:
+#   1. Identify each relevant element in the image
+#   2. Return a normalised bounding box (left, top, right, bottom) as
+#      fractions of image width/height, values between 0.0 and 1.0
+#   3. Assess the relevant SS 638 criteria for that element
+#   4. Return a severity verdict per element
+#
+# The Python code then draws those boxes directly onto the image using Pillow.
 # ---------------------------------------------------------------------------
+
 PROMPTS = {
     "Cable Tray Condition and Fill Level": """
 You are an AI-assisted preliminary screening tool supporting electrical installation \
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-The image is divided into three horizontal content zones based on what is typically \
-visible in electrical plant room photographs:
-- Cable Tray Zone: the upper portion of the image showing ceiling-level cable trays, \
-trunking, and overhead cable runs.
-- Panel Zone: the middle portion of the image showing distribution panels and switchboards.
-- Floor / Clearance Zone: the lower portion of the image showing the floor area in front \
-of panels and any items on the floor.
+Your task has two parts:
 
-Assess each zone using ONLY the criteria relevant to that zone as follows:
+PART 1 — ELEMENT DETECTION AND ASSESSMENT
+Identify every distinct cable tray, trunking run, or cable ladder visible in the image. \
+For each one, provide a bounding box as normalised coordinates (fractions of image \
+width and height, between 0.0 and 1.0) in the format: left, top, right, bottom.
 
-CABLE TRAY ZONE — assess these criteria:
+Assess each detected element against these criteria using only what is clearly visible:
 Criterion 1 (SS 638 Clause 522 — Fill Level): Cable tray fill level does not visually \
 appear to exceed approximately 40% of the cross-sectional tray area.
 Criterion 2 (SS 638 Clause 522 — Tray Condition): Cable tray structure appears undamaged \
@@ -130,33 +141,24 @@ with no visible crushing, cracking, or deformation.
 Criterion 3 (SS 638 Clause 543 — Earth Continuity Conductor): Yellow and green earth \
 continuity conductors are visible and appear to run continuously alongside power cables.
 
-PANEL ZONE — assess this criterion only:
-Criterion 1 (SS 638 Clause 522 — Cable Entry): Cables entering panels from trays appear \
-supported and are not hanging freely under their own weight.
+For each element respond in this EXACT format — do not deviate:
+ELEMENT: Cable Tray [number]
+BBOX: [left], [top], [right], [bottom]
+CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-FLOOR / CLEARANCE ZONE — assess this criterion only:
-Criterion 1 (SS 638 Clause 522 — Floor Cables): No unsupported cables or cable bundles \
-are lying loose on the floor beneath the tray runs.
+Also identify any loose cables visible on the floor and report them as:
+ELEMENT: Floor Cables
+BBOX: [left], [top], [right], [bottom]
+CRITERION 1: FAIL — Loose cables visible on floor
+ELEMENT SEVERITY: FAIL
 
-Use only what is clearly visible. Do not guess. \
-Respond PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE for each criterion.
+If no loose floor cables are visible, skip this element entirely.
 
-Respond in this exact format:
-
-ZONE: Cable Tray Zone
-CRITERION 1: [result] — [one sentence]
-CRITERION 2: [result] — [one sentence]
-CRITERION 3: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
-ZONE: Panel Zone
-CRITERION 1: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
-ZONE: Floor / Clearance Zone
-CRITERION 1: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
+PART 2 — OVERALL SUMMARY
+After all elements, provide:
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
 SUMMARY: [Two to three sentences on the most significant findings.]
 """,
@@ -166,21 +168,14 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-The image is divided into three horizontal content zones based on what is typically \
-visible in electrical plant room photographs:
-- Cable Tray Zone: the upper portion of the image showing ceiling-level cable trays \
-and overhead cable runs feeding into panels.
-- Panel Zone: the middle portion of the image showing distribution panels and switchboards.
-- Floor / Clearance Zone: the lower portion of the image showing the floor area and \
-working clearance in front of panels.
+Your task has two parts:
 
-Assess each zone using ONLY the criteria relevant to that zone as follows:
+PART 1 — ELEMENT DETECTION AND ASSESSMENT
+Identify every distinct distribution panel, switchboard, or electrical enclosure visible \
+in the image. For each one, provide a bounding box as normalised coordinates (fractions \
+of image width and height, between 0.0 and 1.0) in the format: left, top, right, bottom.
 
-CABLE TRAY ZONE — assess this criterion only:
-Criterion 1 (SS 638 Clause 522 — Cable Entry Condition): Cables descending from trays \
-into panels appear organised, supported, and not in contact with sharp tray edges.
-
-PANEL ZONE — assess these criteria:
+Assess each detected element against these criteria using only what is clearly visible:
 Criterion 1 (SS 638 Clause 514 — Panel Condition): Panel doors are present, closed, \
 and not visibly damaged. No exposed live parts are visible.
 Criterion 2 (SS 638 Clause 514 — Labelling): Panel is visibly labelled. Warning signs \
@@ -188,32 +183,22 @@ and identification markings are visible on panel faces.
 Criterion 3 (SS 638 Clause 514 — Panel Integrity): No visible signs of overheating, \
 burn marks, corrosion, or physical damage on panel surfaces.
 
-FLOOR / CLEARANCE ZONE — assess these criteria:
-Criterion 1 (SS 638 Clause 513 — Working Clearance): The floor area in front of panels \
-appears clear with no obstructions blocking access.
-Criterion 2 (SS 638 Clause 522 — Loose Items): No loose cables, tools, or materials \
-are visible on the floor directly in front of panels.
+For each element respond in this EXACT format — do not deviate:
+ELEMENT: Distribution Panel [number]
+BBOX: [left], [top], [right], [bottom]
+CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-Use only what is clearly visible. Do not guess. \
-Respond PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE for each criterion.
+Also identify the floor area in front of panels and assess working clearance:
+ELEMENT: Floor / Working Clearance
+BBOX: [left], [top], [right], [bottom]
+CRITERION 1 (SS 638 Clause 513 — Working Clearance): [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-Respond in this exact format:
-
-ZONE: Cable Tray Zone
-CRITERION 1: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
-ZONE: Panel Zone
-CRITERION 1: [result] — [one sentence]
-CRITERION 2: [result] — [one sentence]
-CRITERION 3: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
-ZONE: Floor / Clearance Zone
-CRITERION 1: [result] — [one sentence]
-CRITERION 2: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
+PART 2 — OVERALL SUMMARY
+After all elements, provide:
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
 SUMMARY: [Two to three sentences on the most significant findings.]
 """,
@@ -223,48 +208,36 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-The image is divided into three horizontal content zones based on what is typically \
-visible in electrical plant room photographs:
-- Cable Tray Zone: the upper portion of the image showing ceiling-level cable trays \
-and overhead cable runs.
-- Panel Zone: the middle portion of the image showing distribution panels and the \
-cables entering them.
-- Floor / Clearance Zone: the lower portion of the image showing the floor area.
+Your task has two parts:
 
-Assess each zone using ONLY the criteria relevant to that zone as follows:
+PART 1 — ELEMENT DETECTION AND ASSESSMENT
+Identify every distinct cable run, cable tray, or group of cables visible in the image. \
+For each one, provide a bounding box as normalised coordinates (fractions of image \
+width and height, between 0.0 and 1.0) in the format: left, top, right, bottom.
 
-CABLE TRAY ZONE — assess these criteria:
-Criterion 1 (SS 638 Clause 522 — Cable Support): Cables inside trays appear secured \
-at visible intervals with no unsupported hanging loops.
-Criterion 2 (SS 638 Clause 514 — Cable Identification): Cables appear colour-coded or \
-labelled in a consistent and identifiable manner.
+Assess each detected element against these criteria using only what is clearly visible:
+Criterion 1 (SS 638 Clause 522 — Cable Support): Cables appear secured to supports \
+at visible intervals with no unsupported hanging loops evident.
+Criterion 2 (SS 638 Clause 514 — Cable Identification): Cables appear colour-coded \
+or labelled in a consistent and identifiable manner.
 
-PANEL ZONE — assess this criterion only:
-Criterion 1 (SS 638 Clause 522 — Cable Entry Support): Cables entering panels appear \
-supported and secured, not hanging freely under their own weight.
+For each element respond in this EXACT format — do not deviate:
+ELEMENT: Cable Run [number]
+BBOX: [left], [top], [right], [bottom]
+CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-FLOOR / CLEARANCE ZONE — assess this criterion only:
-Criterion 1 (SS 638 Clause 522 — Loose or Stray Cables): No unsupported cables are \
-visible lying on the floor or creating potential trip hazards.
+Also identify any loose cables visible on the floor:
+ELEMENT: Floor Cables
+BBOX: [left], [top], [right], [bottom]
+CRITERION 1 (SS 638 Clause 522 — Loose Cables): FAIL — Unsupported cables visible on floor
+ELEMENT SEVERITY: FAIL
 
-Use only what is clearly visible. Do not guess. \
-Respond PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE for each criterion.
+If no loose floor cables are visible, skip the Floor Cables element entirely.
 
-Respond in this exact format:
-
-ZONE: Cable Tray Zone
-CRITERION 1: [result] — [one sentence]
-CRITERION 2: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
-ZONE: Panel Zone
-CRITERION 1: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
-ZONE: Floor / Clearance Zone
-CRITERION 1: [result] — [one sentence]
-ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
-
+PART 2 — OVERALL SUMMARY
+After all elements, provide:
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
 SUMMARY: [Two to three sentences on the most significant findings.]
 """
@@ -289,7 +262,7 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
 
     response = client.chat.completions.create(
         model="gpt-5.5-2026-04-23",
-        max_completion_tokens=1500,
+        max_completion_tokens=2000,
         messages=[
             {
                 "role": "user",
@@ -312,31 +285,58 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
     return response.choices[0].message.content
 
 # ---------------------------------------------------------------------------
-# Helper: parse zone findings from API response text
+# Helper: parse element detections from API response
+# Returns a list of dicts:
+# [{"name": "Cable Tray 1", "bbox": (l,t,r,b), "severity": "PASS", "lines": [...]}, ...]
 # ---------------------------------------------------------------------------
-def parse_zone_findings(response_text: str) -> dict:
-    """
-    Extracts per-zone severity labels from the structured API response.
-    Returns a dict keyed by zone name: e.g.
-    {"Cable Tray Zone": "PASS", "Panel Zone": "FLAG FOR REVIEW", ...}
-    """
-    zones = {}
-    current_zone = None
+def parse_elements(response_text: str) -> list:
+    elements = []
+    current = None
+
     for line in response_text.splitlines():
-        line_stripped = line.strip()
-        if line_stripped.upper().startswith("ZONE:"):
-            current_zone = line_stripped.split(":", 1)[1].strip()
-        elif line_stripped.upper().startswith("ZONE SEVERITY:") and current_zone:
-            severity_raw = line_stripped.split(":", 1)[1].strip().upper()
-            if "NOT APPLICABLE" in severity_raw:
-                zones[current_zone] = "NOT APPLICABLE"
-            elif "FAIL" in severity_raw:
-                zones[current_zone] = "FAIL"
-            elif "FLAG" in severity_raw:
-                zones[current_zone] = "FLAG FOR REVIEW"
-            elif "PASS" in severity_raw:
-                zones[current_zone] = "PASS"
-    return zones
+        line = line.strip()
+        if not line:
+            continue
+
+        if line.upper().startswith("ELEMENT:"):
+            if current:
+                elements.append(current)
+            current = {
+                "name": line.split(":", 1)[1].strip(),
+                "bbox": None,
+                "severity": "CANNOT DETERMINE",
+                "criteria_lines": []
+            }
+
+        elif line.upper().startswith("BBOX:") and current:
+            try:
+                raw = line.split(":", 1)[1].strip()
+                parts = [float(x.strip()) for x in raw.split(",")]
+                if len(parts) == 4:
+                    # Clamp values to 0.0–1.0
+                    parts = [max(0.0, min(1.0, p)) for p in parts]
+                    current["bbox"] = tuple(parts)
+            except Exception:
+                pass
+
+        elif line.upper().startswith("ELEMENT SEVERITY:") and current:
+            sev_raw = line.split(":", 1)[1].strip().upper()
+            if "NOT APPLICABLE" in sev_raw:
+                current["severity"] = "NOT APPLICABLE"
+            elif "FAIL" in sev_raw:
+                current["severity"] = "FAIL"
+            elif "FLAG" in sev_raw:
+                current["severity"] = "FLAG FOR REVIEW"
+            elif "PASS" in sev_raw:
+                current["severity"] = "PASS"
+
+        elif line.upper().startswith("CRITERION") and current:
+            current["criteria_lines"].append(line)
+
+    if current:
+        elements.append(current)
+
+    return elements
 
 # ---------------------------------------------------------------------------
 # Helper: extract overall result
@@ -354,69 +354,81 @@ def extract_overall_result(response_text: str) -> str:
     return "CANNOT DETERMINE"
 
 # ---------------------------------------------------------------------------
-# Helper: draw three-band zone annotation overlay on image
+# Helper: draw element bounding boxes on image
 # ---------------------------------------------------------------------------
-def annotate_image(image: Image.Image, zone_findings: dict) -> Image.Image:
-    colour_map = {
-        "PASS":            (0,   180,  0,   70),
-        "FLAG FOR REVIEW": (255, 165,  0,   70),
-        "FAIL":            (200,  0,   0,   70),
-        "NOT APPLICABLE":  (150, 150, 150,  30),
-    }
-    border_map = {
-        "PASS":            (0,   140,  0,  220),
-        "FLAG FOR REVIEW": (200, 120,  0,  220),
-        "FAIL":            (160,  0,   0,  220),
-        "NOT APPLICABLE":  (120, 120, 120, 180),
-    }
-    label_colour = {
-        "PASS":            (0,   100,  0),
-        "FLAG FOR REVIEW": (140,  80,  0),
-        "FAIL":            (140,   0,  0),
-        "NOT APPLICABLE":  ( 80,  80, 80),
-    }
-
+def annotate_image(image: Image.Image, elements: list) -> Image.Image:
     w, h = image.size
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # Try to load a larger font; fall back to default if unavailable
+    # Font — try system font first, fall back to default
+    font_size = max(16, w // 45)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=max(18, w // 40))
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            size=font_size
+        )
+        font_small = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            size=max(13, w // 60)
+        )
     except Exception:
         font = ImageFont.load_default()
+        font_small = font
 
-    # Map zone names to pixel bands
-    zone_pixel_bands = {}
-    for zone_name, (top_frac, bot_frac) in ZONE_BANDS.items():
-        y0 = int(h * top_frac)
-        y1 = int(h * bot_frac)
-        zone_pixel_bands[zone_name] = (0, y0, w, y1)
+    for elem in elements:
+        bbox = elem.get("bbox")
+        severity = elem.get("severity", "CANNOT DETERMINE")
+        name = elem.get("name", "Element")
 
-    for zone_name, severity in zone_findings.items():
-        coords = zone_pixel_bands.get(zone_name)
-        if not coords:
+        if not bbox:
             continue
-        x0, y0, x1, y1 = coords
-        fill   = colour_map.get(severity,  (150, 150, 150, 30))
-        border = border_map.get(severity,  (120, 120, 120, 180))
 
-        # Fill rectangle
-        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border, width=4)
+        # Convert normalised coords to pixels
+        x0 = int(bbox[0] * w)
+        y0 = int(bbox[1] * h)
+        x1 = int(bbox[2] * w)
+        y1 = int(bbox[3] * h)
 
-        # Zone name label — top left of band
-        name_label = zone_name
-        draw.text((x0 + 12, y0 + 10), name_label,
-                  fill=(255, 255, 255), font=font, stroke_width=2, stroke_fill=(0, 0, 0))
+        # Ensure box has minimum size for visibility
+        if x1 - x0 < 20:
+            x1 = x0 + 20
+        if y1 - y0 < 20:
+            y1 = y0 + 20
 
-        # Severity label — centred in band
-        sev_label = severity
-        tx = (x0 + x1) // 2
-        ty = (y0 + y1) // 2
-        tc = label_colour.get(severity, (80, 80, 80))
-        draw.text((tx, ty), sev_label,
-                  fill=tc, font=font, anchor="mm",
-                  stroke_width=2, stroke_fill=(255, 255, 255))
+        fill   = SEVERITY_FILL.get(severity,   (150, 150, 150, 40))
+        border = SEVERITY_BORDER.get(severity, (120, 120, 120, 200))
+        tcolour = SEVERITY_TEXT.get(severity,  (80,  80,  80))
+
+        # Draw filled rectangle with border
+        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border, width=3)
+
+        # Label background pill at top of box
+        label_text = f"{name} | {severity}"
+        try:
+            bbox_text = draw.textbbox((0, 0), label_text, font=font_small)
+            text_w = bbox_text[2] - bbox_text[0]
+            text_h = bbox_text[3] - bbox_text[1]
+        except Exception:
+            text_w, text_h = len(label_text) * 7, 14
+
+        pad = 4
+        lx0 = x0
+        ly0 = max(0, y0 - text_h - pad * 2)
+        lx1 = min(w, x0 + text_w + pad * 2)
+        ly1 = max(0, y0)
+
+        # Draw label background
+        label_bg = border[:3] + (200,)
+        draw.rectangle([lx0, ly0, lx1, ly1], fill=label_bg)
+
+        # Draw label text
+        draw.text(
+            (lx0 + pad, ly0 + pad),
+            label_text,
+            fill=(255, 255, 255),
+            font=font_small
+        )
 
     base = image.convert("RGBA")
     combined = Image.alpha_composite(base, overlay)
@@ -449,6 +461,59 @@ def extract_frames(video_path: str, interval_seconds: int, max_frames: int) -> l
     return frames
 
 # ---------------------------------------------------------------------------
+# Helper: render inspection results to screen
+# ---------------------------------------------------------------------------
+def render_results(image, response_text):
+    elements = parse_elements(response_text)
+    overall  = extract_overall_result(response_text)
+
+    # Annotated image
+    if elements:
+        annotated = annotate_image(image, elements)
+        st.image(
+            annotated,
+            caption="Annotated output — bounding boxes colour-coded by severity",
+            use_container_width=True
+        )
+    else:
+        st.image(image, caption="No elements detected", use_container_width=True)
+
+    # Overall result banner
+    if overall == "PASS":
+        st.success(f"Overall Result: {overall}")
+    elif overall == "FLAG FOR REVIEW":
+        st.warning(f"Overall Result: {overall}")
+    elif overall == "FAIL":
+        st.error(f"Overall Result: {overall}")
+    else:
+        st.info(f"Overall Result: {overall}")
+
+    # Elements summary table
+    if elements:
+        st.subheader("Detected Elements")
+        cols = st.columns([3, 2])
+        cols[0].markdown("**Element**")
+        cols[1].markdown("**Severity**")
+        for elem in elements:
+            c1, c2 = st.columns([3, 2])
+            c1.write(elem["name"])
+            sev = elem["severity"]
+            if sev == "PASS":
+                c2.success(sev)
+            elif sev == "FLAG FOR REVIEW":
+                c2.warning(sev)
+            elif sev == "FAIL":
+                c2.error(sev)
+            else:
+                c2.info(sev)
+
+    # Full written report
+    with st.expander("Full Assessment Report", expanded=True):
+        st.text(response_text)
+
+    return overall, elements
+
+# ---------------------------------------------------------------------------
 # Main application logic
 # ---------------------------------------------------------------------------
 prompt_text = PROMPTS[category]
@@ -472,36 +537,7 @@ if input_mode == "Single Photograph":
                     try:
                         image_b64 = encode_image_to_base64(image)
                         response_text = call_gpt_vision(api_key, image_b64, prompt_text)
-
-                        zone_findings = parse_zone_findings(response_text)
-                        overall = extract_overall_result(response_text)
-
-                        # Annotated image
-                        if zone_findings:
-                            annotated = annotate_image(image, zone_findings)
-                            st.image(
-                                annotated,
-                                caption="Annotated output — colour-coded by zone",
-                                use_container_width=True
-                            )
-                        else:
-                            st.image(image, caption="No zone data parsed",
-                                     use_container_width=True)
-
-                        # Overall result banner
-                        if overall == "PASS":
-                            st.success(f"Overall Result: {overall}")
-                        elif overall == "FLAG FOR REVIEW":
-                            st.warning(f"Overall Result: {overall}")
-                        elif overall == "FAIL":
-                            st.error(f"Overall Result: {overall}")
-                        else:
-                            st.info(f"Overall Result: {overall}")
-
-                        # Full written report
-                        with st.expander("Full Assessment Report", expanded=True):
-                            st.text(response_text)
-
+                        render_results(image, response_text)
                     except Exception as e:
                         st.error(f"API request failed: {e}")
 
@@ -551,14 +587,16 @@ elif input_mode == "Video Walkthrough":
                                     response_text = call_gpt_vision(
                                         api_key, image_b64, prompt_text
                                     )
-                                    zone_findings = parse_zone_findings(response_text)
-                                    overall = extract_overall_result(response_text)
+                                    overall, elements = render_results.__wrapped__ \
+                                        if hasattr(render_results, '__wrapped__') \
+                                        else (extract_overall_result(response_text),
+                                              parse_elements(response_text))
                                     results.append({
                                         "frame": i + 1,
                                         "timestamp": timestamp,
                                         "image": frame_image,
-                                        "zone_findings": zone_findings,
-                                        "overall": overall,
+                                        "elements": parse_elements(response_text),
+                                        "overall": extract_overall_result(response_text),
                                         "report": response_text
                                     })
                                 except Exception as e:
@@ -566,7 +604,7 @@ elif input_mode == "Video Walkthrough":
                                         "frame": i + 1,
                                         "timestamp": timestamp,
                                         "image": frame_image,
-                                        "zone_findings": {},
+                                        "elements": [],
                                         "overall": "ERROR",
                                         "report": str(e)
                                     })
@@ -601,18 +639,7 @@ elif input_mode == "Video Walkthrough":
                                 f"Result: {r['overall']}"
                             )
                             with st.expander(label):
-                                if r["zone_findings"]:
-                                    annotated = annotate_image(
-                                        r["image"], r["zone_findings"]
-                                    )
-                                    st.image(
-                                        annotated,
-                                        caption="Annotated frame",
-                                        use_container_width=True
-                                    )
-                                else:
-                                    st.image(r["image"], use_container_width=True)
-                                st.text(r["report"])
+                                render_results(r["image"], r["report"])
 
                     os.unlink(tmp_path)
 
