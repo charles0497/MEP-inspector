@@ -42,7 +42,7 @@ st.warning(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — API key and category selection
+# Sidebar — API key and settings
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Settings")
@@ -86,7 +86,25 @@ with st.sidebar:
         )
 
 # ---------------------------------------------------------------------------
-# Inspection prompts — one per category, structured against SS 638 criteria
+# Zone definitions — three horizontal content bands
+#
+# Based on observed site photograph layouts:
+#   Cable Tray Zone    — top 35% of image (ceiling, trays, overhead cables)
+#   Panel Zone         — middle 40% of image (distribution panels, switchboards)
+#   Floor/Clear Zone   — bottom 25% of image (floor, working clearance, loose items)
+#
+# Each zone is assessed only against criteria relevant to what it contains.
+# This eliminates CANNOT DETERMINE responses caused by asking the wrong
+# criteria in the wrong area of the image.
+# ---------------------------------------------------------------------------
+ZONE_BANDS = {
+    "Cable Tray Zone":         (0.00, 0.35),   # top 35%
+    "Panel Zone":              (0.35, 0.75),   # middle 40%
+    "Floor / Clearance Zone":  (0.75, 1.00),   # bottom 25%
+}
+
+# ---------------------------------------------------------------------------
+# Inspection prompts — three-band content-based zoning
 # ---------------------------------------------------------------------------
 PROMPTS = {
     "Cable Tray Condition and Fill Level": """
@@ -94,31 +112,53 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-Divide the image into four zones: Top-Left, Top-Right, Bottom-Left, Bottom-Right.
-For each zone that contains a visible cable tray, evaluate the following criteria \
-using only what is clearly visible. Do not guess if something is not visible.
+The image is divided into three horizontal content zones based on what is typically \
+visible in electrical plant room photographs:
+- Cable Tray Zone: the upper portion of the image showing ceiling-level cable trays, \
+trunking, and overhead cable runs.
+- Panel Zone: the middle portion of the image showing distribution panels and switchboards.
+- Floor / Clearance Zone: the lower portion of the image showing the floor area in front \
+of panels and any items on the floor.
 
-Criterion 1 (SS 638 Clause 522 — Fill Level):
-Cable tray fill level does not visually appear to exceed approximately 40% of the \
-cross-sectional tray area.
+Assess each zone using ONLY the criteria relevant to that zone as follows:
 
-Criterion 2 (SS 638 Clause 522 — Tray Condition):
-Cable tray structure appears undamaged with no visible crushing, cracking, or deformation.
+CABLE TRAY ZONE — assess these criteria:
+Criterion 1 (SS 638 Clause 522 — Fill Level): Cable tray fill level does not visually \
+appear to exceed approximately 40% of the cross-sectional tray area.
+Criterion 2 (SS 638 Clause 522 — Tray Condition): Cable tray structure appears undamaged \
+with no visible crushing, cracking, or deformation.
+Criterion 3 (SS 638 Clause 543 — Earth Continuity Conductor): Yellow and green earth \
+continuity conductors are visible and appear to run continuously alongside power cables.
 
-Criterion 3 (SS 638 Clause 543 — Earth Continuity Conductor):
-Yellow and green earth continuity conductors are visible and appear to run continuously \
-alongside power cables.
+PANEL ZONE — assess this criterion only:
+Criterion 1 (SS 638 Clause 522 — Cable Entry): Cables entering panels from trays appear \
+supported and are not hanging freely under their own weight.
 
-For each zone, respond in this exact format:
-ZONE: [zone name]
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
+FLOOR / CLEARANCE ZONE — assess this criterion only:
+Criterion 1 (SS 638 Clause 522 — Floor Cables): No unsupported cables or cable bundles \
+are lying loose on the floor beneath the tray runs.
+
+Use only what is clearly visible. Do not guess. \
+Respond PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE for each criterion.
+
+Respond in this exact format:
+
+ZONE: Cable Tray Zone
+CRITERION 1: [result] — [one sentence]
+CRITERION 2: [result] — [one sentence]
+CRITERION 3: [result] — [one sentence]
 ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
 
-After all zones, provide:
+ZONE: Panel Zone
+CRITERION 1: [result] — [one sentence]
+ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
+
+ZONE: Floor / Clearance Zone
+CRITERION 1: [result] — [one sentence]
+ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
+
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
-SUMMARY: [Two to three sentences describing the most significant findings.]
+SUMMARY: [Two to three sentences on the most significant findings.]
 """,
 
     "Distribution Panel Condition": """
@@ -126,32 +166,56 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-Divide the image into four zones: Top-Left, Top-Right, Bottom-Left, Bottom-Right.
-For each zone that contains a visible distribution panel or switchboard, evaluate \
-the following criteria using only what is clearly visible. Do not guess if something \
-is not visible.
+The image is divided into three horizontal content zones based on what is typically \
+visible in electrical plant room photographs:
+- Cable Tray Zone: the upper portion of the image showing ceiling-level cable trays \
+and overhead cable runs feeding into panels.
+- Panel Zone: the middle portion of the image showing distribution panels and switchboards.
+- Floor / Clearance Zone: the lower portion of the image showing the floor area and \
+working clearance in front of panels.
 
-Criterion 1 (SS 638 Clause 514 — Panel Condition):
-Panel doors are present, closed, and not visibly damaged. No exposed live parts are visible.
+Assess each zone using ONLY the criteria relevant to that zone as follows:
 
-Criterion 2 (SS 638 Clause 514 — Labelling):
-Panel is visibly labelled. Circuit breakers and protection devices appear to carry \
-legible identification markings.
+CABLE TRAY ZONE — assess this criterion only:
+Criterion 1 (SS 638 Clause 522 — Cable Entry Condition): Cables descending from trays \
+into panels appear organised, supported, and not in contact with sharp tray edges.
 
-Criterion 3 (SS 638 Clause 513 — Working Clearance):
-There appears to be clear working space in front of the panel with no obstructions \
-directly blocking access.
+PANEL ZONE — assess these criteria:
+Criterion 1 (SS 638 Clause 514 — Panel Condition): Panel doors are present, closed, \
+and not visibly damaged. No exposed live parts are visible.
+Criterion 2 (SS 638 Clause 514 — Labelling): Panel is visibly labelled. Warning signs \
+and identification markings are visible on panel faces.
+Criterion 3 (SS 638 Clause 514 — Panel Integrity): No visible signs of overheating, \
+burn marks, corrosion, or physical damage on panel surfaces.
 
-For each zone, respond in this exact format:
-ZONE: [zone name]
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
+FLOOR / CLEARANCE ZONE — assess these criteria:
+Criterion 1 (SS 638 Clause 513 — Working Clearance): The floor area in front of panels \
+appears clear with no obstructions blocking access.
+Criterion 2 (SS 638 Clause 522 — Loose Items): No loose cables, tools, or materials \
+are visible on the floor directly in front of panels.
+
+Use only what is clearly visible. Do not guess. \
+Respond PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE for each criterion.
+
+Respond in this exact format:
+
+ZONE: Cable Tray Zone
+CRITERION 1: [result] — [one sentence]
 ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
 
-After all zones, provide:
+ZONE: Panel Zone
+CRITERION 1: [result] — [one sentence]
+CRITERION 2: [result] — [one sentence]
+CRITERION 3: [result] — [one sentence]
+ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
+
+ZONE: Floor / Clearance Zone
+CRITERION 1: [result] — [one sentence]
+CRITERION 2: [result] — [one sentence]
+ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
+
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
-SUMMARY: [Two to three sentences describing the most significant findings.]
+SUMMARY: [Two to three sentences on the most significant findings.]
 """,
 
     "Cable Support, Identification and Loose Cables": """
@@ -159,31 +223,50 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-Divide the image into four zones: Top-Left, Top-Right, Bottom-Left, Bottom-Right.
-For each zone, evaluate the following criteria using only what is clearly visible. \
-Do not guess if something is not visible.
+The image is divided into three horizontal content zones based on what is typically \
+visible in electrical plant room photographs:
+- Cable Tray Zone: the upper portion of the image showing ceiling-level cable trays \
+and overhead cable runs.
+- Panel Zone: the middle portion of the image showing distribution panels and the \
+cables entering them.
+- Floor / Clearance Zone: the lower portion of the image showing the floor area.
 
-Criterion 1 (SS 638 Clause 522 — Cable Support):
-Cables are secured to supports at visible intervals with no unsupported spans or \
-hanging loops evident.
+Assess each zone using ONLY the criteria relevant to that zone as follows:
 
-Criterion 2 (SS 638 Clause 514 — Cable Identification):
-Cables appear to be labelled or colour-coded in a consistent and identifiable manner.
+CABLE TRAY ZONE — assess these criteria:
+Criterion 1 (SS 638 Clause 522 — Cable Support): Cables inside trays appear secured \
+at visible intervals with no unsupported hanging loops.
+Criterion 2 (SS 638 Clause 514 — Cable Identification): Cables appear colour-coded or \
+labelled in a consistent and identifiable manner.
 
-Criterion 3 (SS 638 Clause 522 — Loose or Stray Cables):
-No unsupported cables are visible lying on floors, above ceiling spaces, or creating \
-potential trip hazards.
+PANEL ZONE — assess this criterion only:
+Criterion 1 (SS 638 Clause 522 — Cable Entry Support): Cables entering panels appear \
+supported and secured, not hanging freely under their own weight.
 
-For each zone, respond in this exact format:
-ZONE: [zone name]
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence explanation]
+FLOOR / CLEARANCE ZONE — assess this criterion only:
+Criterion 1 (SS 638 Clause 522 — Loose or Stray Cables): No unsupported cables are \
+visible lying on the floor or creating potential trip hazards.
+
+Use only what is clearly visible. Do not guess. \
+Respond PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE for each criterion.
+
+Respond in this exact format:
+
+ZONE: Cable Tray Zone
+CRITERION 1: [result] — [one sentence]
+CRITERION 2: [result] — [one sentence]
 ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
 
-After all zones, provide:
+ZONE: Panel Zone
+CRITERION 1: [result] — [one sentence]
+ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
+
+ZONE: Floor / Clearance Zone
+CRITERION 1: [result] — [one sentence]
+ZONE SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / NOT APPLICABLE]
+
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
-SUMMARY: [Two to three sentences describing the most significant findings.]
+SUMMARY: [Two to three sentences on the most significant findings.]
 """
 }
 
@@ -205,7 +288,7 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
     client = OpenAI(api_key=api_key)
 
     response = client.chat.completions.create(
-        model="gpt-5.5-2026-04-23",   # <-- UPDATE THIS to latest model string
+        model="gpt-5.5-2026-04-23",
         max_completion_tokens=1500,
         messages=[
             {
@@ -234,26 +317,25 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
 def parse_zone_findings(response_text: str) -> dict:
     """
     Extracts per-zone severity labels from the structured API response.
-    Returns a dict: {"Top-Left": "PASS", "Top-Right": "FLAG FOR REVIEW", ...}
+    Returns a dict keyed by zone name: e.g.
+    {"Cable Tray Zone": "PASS", "Panel Zone": "FLAG FOR REVIEW", ...}
     """
     zones = {}
-    severity_map = {
-        "PASS": "PASS",
-        "FLAG FOR REVIEW": "FLAG FOR REVIEW",
-        "FAIL": "FAIL",
-        "NOT APPLICABLE": "NOT APPLICABLE"
-    }
     current_zone = None
     for line in response_text.splitlines():
-        line = line.strip()
-        if line.upper().startswith("ZONE:"):
-            current_zone = line.split(":", 1)[1].strip()
-        elif line.upper().startswith("ZONE SEVERITY:") and current_zone:
-            severity_raw = line.split(":", 1)[1].strip().upper()
-            for key in severity_map:
-                if key in severity_raw:
-                    zones[current_zone] = severity_map[key]
-                    break
+        line_stripped = line.strip()
+        if line_stripped.upper().startswith("ZONE:"):
+            current_zone = line_stripped.split(":", 1)[1].strip()
+        elif line_stripped.upper().startswith("ZONE SEVERITY:") and current_zone:
+            severity_raw = line_stripped.split(":", 1)[1].strip().upper()
+            if "NOT APPLICABLE" in severity_raw:
+                zones[current_zone] = "NOT APPLICABLE"
+            elif "FAIL" in severity_raw:
+                zones[current_zone] = "FAIL"
+            elif "FLAG" in severity_raw:
+                zones[current_zone] = "FLAG FOR REVIEW"
+            elif "PASS" in severity_raw:
+                zones[current_zone] = "PASS"
     return zones
 
 # ---------------------------------------------------------------------------
@@ -272,48 +354,69 @@ def extract_overall_result(response_text: str) -> str:
     return "CANNOT DETERMINE"
 
 # ---------------------------------------------------------------------------
-# Helper: draw zone annotation overlay on image
+# Helper: draw three-band zone annotation overlay on image
 # ---------------------------------------------------------------------------
 def annotate_image(image: Image.Image, zone_findings: dict) -> Image.Image:
     colour_map = {
-        "PASS": (0, 180, 0, 80),           # green, semi-transparent
-        "FLAG FOR REVIEW": (255, 165, 0, 80),  # amber
-        "FAIL": (200, 0, 0, 80),           # red
-        "NOT APPLICABLE": (150, 150, 150, 40)  # grey
+        "PASS":            (0,   180,  0,   70),
+        "FLAG FOR REVIEW": (255, 165,  0,   70),
+        "FAIL":            (200,  0,   0,   70),
+        "NOT APPLICABLE":  (150, 150, 150,  30),
+    }
+    border_map = {
+        "PASS":            (0,   140,  0,  220),
+        "FLAG FOR REVIEW": (200, 120,  0,  220),
+        "FAIL":            (160,  0,   0,  220),
+        "NOT APPLICABLE":  (120, 120, 120, 180),
     }
     label_colour = {
-        "PASS": (0, 120, 0),
-        "FLAG FOR REVIEW": (180, 100, 0),
-        "FAIL": (160, 0, 0),
-        "NOT APPLICABLE": (100, 100, 100)
+        "PASS":            (0,   100,  0),
+        "FLAG FOR REVIEW": (140,  80,  0),
+        "FAIL":            (140,   0,  0),
+        "NOT APPLICABLE":  ( 80,  80, 80),
     }
 
     w, h = image.size
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    zone_coords = {
-        "Top-Left":     (0,     0,     w//2,  h//2),
-        "Top-Right":    (w//2,  0,     w,     h//2),
-        "Bottom-Left":  (0,     h//2,  w//2,  h),
-        "Bottom-Right": (w//2,  h//2,  w,     h)
-    }
+    # Try to load a larger font; fall back to default if unavailable
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=max(18, w // 40))
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Map zone names to pixel bands
+    zone_pixel_bands = {}
+    for zone_name, (top_frac, bot_frac) in ZONE_BANDS.items():
+        y0 = int(h * top_frac)
+        y1 = int(h * bot_frac)
+        zone_pixel_bands[zone_name] = (0, y0, w, y1)
 
     for zone_name, severity in zone_findings.items():
-        coords = zone_coords.get(zone_name)
+        coords = zone_pixel_bands.get(zone_name)
         if not coords:
             continue
         x0, y0, x1, y1 = coords
-        fill = colour_map.get(severity, (150, 150, 150, 40))
-        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=fill[:3] + (220,), width=3)
+        fill   = colour_map.get(severity,  (150, 150, 150, 30))
+        border = border_map.get(severity,  (120, 120, 120, 180))
 
-        # Label text in zone centre
-        label = severity
+        # Fill rectangle
+        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border, width=4)
+
+        # Zone name label — top left of band
+        name_label = zone_name
+        draw.text((x0 + 12, y0 + 10), name_label,
+                  fill=(255, 255, 255), font=font, stroke_width=2, stroke_fill=(0, 0, 0))
+
+        # Severity label — centred in band
+        sev_label = severity
         tx = (x0 + x1) // 2
         ty = (y0 + y1) // 2
         tc = label_colour.get(severity, (80, 80, 80))
-        draw.text((tx - 2, ty - 2), label, fill=(255, 255, 255), anchor="mm")
-        draw.text((tx, ty), label, fill=tc, anchor="mm")
+        draw.text((tx, ty), sev_label,
+                  fill=tc, font=font, anchor="mm",
+                  stroke_width=2, stroke_fill=(255, 255, 255))
 
     base = image.convert("RGBA")
     combined = Image.alpha_composite(base, overlay)
@@ -382,7 +485,8 @@ if input_mode == "Single Photograph":
                                 use_container_width=True
                             )
                         else:
-                            st.image(image, caption="No zone data parsed", use_container_width=True)
+                            st.image(image, caption="No zone data parsed",
+                                     use_container_width=True)
 
                         # Overall result banner
                         if overall == "PASS":
@@ -438,8 +542,10 @@ elif input_mode == "Video Walkthrough":
 
                         results = []
                         for i, (frame_image, timestamp) in enumerate(frames):
-                            with st.spinner(f"Analysing frame {i+1} of {len(frames)} "
-                                            f"(at {timestamp:.1f}s)..."):
+                            with st.spinner(
+                                f"Analysing frame {i+1} of {len(frames)} "
+                                f"(at {timestamp:.1f}s)..."
+                            ):
                                 try:
                                     image_b64 = encode_image_to_base64(frame_image)
                                     response_text = call_gpt_vision(
@@ -468,9 +574,9 @@ elif input_mode == "Video Walkthrough":
 
                         # Session summary
                         st.subheader("Session Summary")
-                        total = len(results)
-                        fails = sum(1 for r in results if r["overall"] == "FAIL")
-                        flags = sum(1 for r in results if r["overall"] == "FLAG FOR REVIEW")
+                        total  = len(results)
+                        fails  = sum(1 for r in results if r["overall"] == "FAIL")
+                        flags  = sum(1 for r in results if r["overall"] == "FLAG FOR REVIEW")
                         passes = sum(1 for r in results if r["overall"] == "PASS")
 
                         col1, col2, col3, col4 = st.columns(4)
@@ -479,7 +585,6 @@ elif input_mode == "Video Walkthrough":
                         col3.metric("Flag for Review", flags)
                         col4.metric("Fail", fails)
 
-                        # Worst-case overall
                         if fails > 0:
                             st.error("Worst-case result across session: FAIL")
                         elif flags > 0:
