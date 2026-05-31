@@ -4,6 +4,7 @@ import io
 import base64
 import tempfile
 import os
+import re
 
 # Optional dependencies — handled gracefully if not installed
 try:
@@ -42,7 +43,7 @@ st.warning(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — API key and settings
+# Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Settings")
@@ -59,106 +60,135 @@ with st.sidebar:
             "Cable Tray Condition and Fill Level",
             "Distribution Panel Condition",
             "Cable Support, Identification and Loose Cables"
-        ],
-        help="Select the inspection category that matches your site photograph."
+        ]
     )
 
     input_mode = st.radio(
         "Input Type",
-        options=["Single Photograph", "Video Walkthrough"],
-        help="Choose whether you are uploading a photo or a recorded site video."
+        options=["Single Photograph", "Video Walkthrough"]
     )
 
     if input_mode == "Video Walkthrough":
-        frame_interval = st.slider(
-            "Frame extraction interval (seconds)",
-            min_value=1,
-            max_value=30,
-            value=5,
-            help="One frame will be extracted and analysed for every N seconds of video."
-        )
-        max_frames = st.slider(
-            "Maximum frames to analyse",
-            min_value=1,
-            max_value=20,
-            value=5,
-            help="Cap the number of frames sent to the API to control cost and time."
-        )
+        frame_interval = st.slider("Frame extraction interval (seconds)", 1, 30, 5)
+        max_frames = st.slider("Maximum frames to analyse", 1, 20, 5)
 
 # ---------------------------------------------------------------------------
-# Colour scheme for severity levels
+# Colour scheme
 # ---------------------------------------------------------------------------
-SEVERITY_FILL = {
-    "PASS":            (0,   200,   0,  60),
-    "FLAG FOR REVIEW": (255, 165,   0,  60),
-    "FAIL":            (220,   0,   0,  60),
-    "CANNOT DETERMINE":(150, 150, 150,  40),
+SEVERITY_FILL   = {
+    "PASS":             (0,   200,   0,  55),
+    "FLAG FOR REVIEW":  (255, 165,   0,  55),
+    "FAIL":             (220,   0,   0,  55),
+    "CANNOT DETERMINE": (150, 150, 150,  40),
 }
 SEVERITY_BORDER = {
-    "PASS":            (0,   160,   0, 230),
-    "FLAG FOR REVIEW": (210, 130,   0, 230),
-    "FAIL":            (180,   0,   0, 230),
-    "CANNOT DETERMINE":(120, 120, 120, 200),
+    "PASS":             (0,   160,   0, 240),
+    "FLAG FOR REVIEW":  (210, 130,   0, 240),
+    "FAIL":             (180,   0,   0, 240),
+    "CANNOT DETERMINE": (120, 120, 120, 200),
 }
-SEVERITY_TEXT = {
-    "PASS":            (0,   110,   0),
-    "FLAG FOR REVIEW": (150,  90,   0),
-    "FAIL":            (150,   0,   0),
-    "CANNOT DETERMINE":( 80,  80,  80),
+SEVERITY_TEXT   = {
+    "PASS":             (0,   100,   0),
+    "FLAG FOR REVIEW":  (150,  90,   0),
+    "FAIL":             (150,   0,   0),
+    "CANNOT DETERMINE": ( 80,  80,  80),
 }
 
 # ---------------------------------------------------------------------------
-# Inspection prompts — element-based bounding box detection
+# Rule-based layout engine
 #
-# GPT-5.5 is asked to:
-#   1. Identify each relevant element in the image
-#   2. Return a normalised bounding box (left, top, right, bottom) as
-#      fractions of image width/height, values between 0.0 and 1.0
-#   3. Assess the relevant SS 638 criteria for that element
-#   4. Return a severity verdict per element
+# Based on observed patterns across site photographs:
+#   - Cable trays occupy the top ~35% of the frame
+#   - Distribution panels occupy the middle ~40%
+#   - Floor / working clearance occupies the bottom ~25%
 #
-# The Python code then draws those boxes directly onto the image using Pillow.
+# When the model reports N instances of an element type, this engine
+# divides the relevant band into N equal vertical columns and draws
+# one box per instance within that band.
 # ---------------------------------------------------------------------------
 
+ELEMENT_BANDS = {
+    # element_type_key : (top_fraction, bottom_fraction)
+    "cable_tray":        (0.00, 0.38),
+    "distribution_panel":(0.30, 0.78),
+    "floor_clearance":   (0.72, 1.00),
+    "cable_run":         (0.00, 0.75),
+    "loose_cables":      (0.72, 1.00),
+}
+
+def compute_boxes(element_type: str, count: int, img_w: int, img_h: int,
+                  h_margin: float = 0.03) -> list:
+    """
+    Divide the element band into `count` equal vertical columns.
+    Returns a list of pixel-coordinate tuples (x0, y0, x1, y1).
+    """
+    band = ELEMENT_BANDS.get(element_type)
+    if not band:
+        band = (0.10, 0.90)
+
+    y0 = int(band[0] * img_h)
+    y1 = int(band[1] * img_h)
+
+    col_w = img_w / max(count, 1)
+    margin = int(h_margin * img_w)
+
+    boxes = []
+    for i in range(count):
+        bx0 = int(i * col_w) + margin
+        bx1 = int((i + 1) * col_w) - margin
+        boxes.append((bx0, y0, bx1, y1))
+    return boxes
+
+# ---------------------------------------------------------------------------
+# Prompts — GPT-5.5 identifies element types and counts, assesses criteria
+# ---------------------------------------------------------------------------
 PROMPTS = {
     "Cable Tray Condition and Fill Level": """
 You are an AI-assisted preliminary screening tool supporting electrical installation \
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-Your task has two parts:
+Carefully examine the image and identify all visible cable trays, trunking runs, \
+and cable ladders. Count how many distinct cable tray sections are visible.
 
-PART 1 — ELEMENT DETECTION AND ASSESSMENT
-Identify every distinct cable tray, trunking run, or cable ladder visible in the image. \
-For each one, provide a bounding box as normalised coordinates (fractions of image \
-width and height, between 0.0 and 1.0) in the format: left, top, right, bottom.
+For EACH cable tray section, assess the following criteria using only what is \
+clearly visible. Do not guess if something is not visible.
 
-Assess each detected element against these criteria using only what is clearly visible:
-Criterion 1 (SS 638 Clause 522 — Fill Level): Cable tray fill level does not visually \
-appear to exceed approximately 40% of the cross-sectional tray area.
-Criterion 2 (SS 638 Clause 522 — Tray Condition): Cable tray structure appears undamaged \
-with no visible crushing, cracking, or deformation.
-Criterion 3 (SS 638 Clause 543 — Earth Continuity Conductor): Yellow and green earth \
-continuity conductors are visible and appear to run continuously alongside power cables.
+Criterion 1 (SS 638 Clause 522 — Fill Level):
+Cable tray fill level does not visually appear to exceed approximately 40% of the \
+cross-sectional tray area.
 
-For each element respond in this EXACT format — do not deviate:
-ELEMENT: Cable Tray [number]
-BBOX: [left], [top], [right], [bottom]
+Criterion 2 (SS 638 Clause 522 — Tray Condition):
+Cable tray structure appears undamaged with no visible crushing, cracking, or deformation.
+
+Criterion 3 (SS 638 Clause 543 — Earth Continuity Conductor):
+Yellow and green earth continuity conductors are visible and appear to run continuously \
+alongside power cables.
+
+Also check the floor area and report whether loose cables are present on the floor.
+
+Respond in this EXACT format:
+
+CABLE TRAY COUNT: [number]
+
+CABLE TRAY 1:
 CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
 CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
 CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-Also identify any loose cables visible on the floor and report them as:
-ELEMENT: Floor Cables
-BBOX: [left], [top], [right], [bottom]
-CRITERION 1: FAIL — Loose cables visible on floor
-ELEMENT SEVERITY: FAIL
+CABLE TRAY 2:
+CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-If no loose floor cables are visible, skip this element entirely.
+(repeat for each tray found)
 
-PART 2 — OVERALL SUMMARY
-After all elements, provide:
+FLOOR CABLES:
+LOOSE CABLES PRESENT: [YES / NO]
+SEVERITY: [FAIL / PASS]
+
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
 SUMMARY: [Two to three sentences on the most significant findings.]
 """,
@@ -168,37 +198,48 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-Your task has two parts:
+Carefully examine the image and identify all visible distribution panels, switchboards, \
+and electrical enclosures. Count how many distinct panels are visible.
 
-PART 1 — ELEMENT DETECTION AND ASSESSMENT
-Identify every distinct distribution panel, switchboard, or electrical enclosure visible \
-in the image. For each one, provide a bounding box as normalised coordinates (fractions \
-of image width and height, between 0.0 and 1.0) in the format: left, top, right, bottom.
+For EACH panel, assess the following criteria using only what is clearly visible. \
+Do not guess if something is not visible.
 
-Assess each detected element against these criteria using only what is clearly visible:
-Criterion 1 (SS 638 Clause 514 — Panel Condition): Panel doors are present, closed, \
-and not visibly damaged. No exposed live parts are visible.
-Criterion 2 (SS 638 Clause 514 — Labelling): Panel is visibly labelled. Warning signs \
-and identification markings are visible on panel faces.
-Criterion 3 (SS 638 Clause 514 — Panel Integrity): No visible signs of overheating, \
-burn marks, corrosion, or physical damage on panel surfaces.
+Criterion 1 (SS 638 Clause 514 — Panel Condition):
+Panel doors are present, closed, and not visibly damaged. No exposed live parts visible.
 
-For each element respond in this EXACT format — do not deviate:
-ELEMENT: Distribution Panel [number]
-BBOX: [left], [top], [right], [bottom]
+Criterion 2 (SS 638 Clause 514 — Labelling):
+Panel is visibly labelled. Warning signs and identification markings are visible on \
+panel faces.
+
+Criterion 3 (SS 638 Clause 514 — Panel Integrity):
+No visible signs of overheating, burn marks, corrosion, or physical damage on panel \
+surfaces.
+
+Also assess the floor area in front of the panels for working clearance.
+
+Respond in this EXACT format:
+
+DISTRIBUTION PANEL COUNT: [number]
+
+DISTRIBUTION PANEL 1:
 CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
 CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
 CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-Also identify the floor area in front of panels and assess working clearance:
-ELEMENT: Floor / Working Clearance
-BBOX: [left], [top], [right], [bottom]
+DISTRIBUTION PANEL 2:
+CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
+
+(repeat for each panel found)
+
+FLOOR / WORKING CLEARANCE:
 CRITERION 1 (SS 638 Clause 513 — Working Clearance): [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
+CRITERION 2 (SS 638 Clause 522 — Loose Items): [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-PART 2 — OVERALL SUMMARY
-After all elements, provide:
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
 SUMMARY: [Two to three sentences on the most significant findings.]
 """,
@@ -208,36 +249,41 @@ You are an AI-assisted preliminary screening tool supporting electrical installa
 inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
 and EMA regulations.
 
-Your task has two parts:
+Carefully examine the image and identify all visible cable runs and cable groups. \
+Count how many distinct cable runs or bundles are visible.
 
-PART 1 — ELEMENT DETECTION AND ASSESSMENT
-Identify every distinct cable run, cable tray, or group of cables visible in the image. \
-For each one, provide a bounding box as normalised coordinates (fractions of image \
-width and height, between 0.0 and 1.0) in the format: left, top, right, bottom.
+For EACH cable run, assess the following criteria using only what is clearly visible. \
+Do not guess if something is not visible.
 
-Assess each detected element against these criteria using only what is clearly visible:
-Criterion 1 (SS 638 Clause 522 — Cable Support): Cables appear secured to supports \
-at visible intervals with no unsupported hanging loops evident.
-Criterion 2 (SS 638 Clause 514 — Cable Identification): Cables appear colour-coded \
-or labelled in a consistent and identifiable manner.
+Criterion 1 (SS 638 Clause 522 — Cable Support):
+Cables appear secured to supports at visible intervals with no unsupported hanging \
+loops evident.
 
-For each element respond in this EXACT format — do not deviate:
-ELEMENT: Cable Run [number]
-BBOX: [left], [top], [right], [bottom]
+Criterion 2 (SS 638 Clause 514 — Cable Identification):
+Cables appear colour-coded or labelled in a consistent and identifiable manner.
+
+Also check the floor area for loose or stray cables.
+
+Respond in this EXACT format:
+
+CABLE RUN COUNT: [number]
+
+CABLE RUN 1:
 CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
 CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-ELEMENT SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-Also identify any loose cables visible on the floor:
-ELEMENT: Floor Cables
-BBOX: [left], [top], [right], [bottom]
-CRITERION 1 (SS 638 Clause 522 — Loose Cables): FAIL — Unsupported cables visible on floor
-ELEMENT SEVERITY: FAIL
+CABLE RUN 2:
+CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
+SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
 
-If no loose floor cables are visible, skip the Floor Cables element entirely.
+(repeat for each cable run found)
 
-PART 2 — OVERALL SUMMARY
-After all elements, provide:
+FLOOR CABLES:
+LOOSE CABLES PRESENT: [YES / NO]
+SEVERITY: [FAIL / PASS]
+
 OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
 SUMMARY: [Two to three sentences on the most significant findings.]
 """
@@ -256,10 +302,8 @@ def encode_image_to_base64(image: Image.Image) -> str:
 # ---------------------------------------------------------------------------
 def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
     if not OPENAI_AVAILABLE:
-        return "ERROR: openai package is not installed. Run: pip install openai"
-
+        return "ERROR: openai package is not installed."
     client = OpenAI(api_key=api_key)
-
     response = client.chat.completions.create(
         model="gpt-5.5-2026-04-23",
         max_completion_tokens=2000,
@@ -274,10 +318,7 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
                             "detail": "high"
                         }
                     },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
+                    {"type": "text", "text": prompt}
                 ]
             }
         ]
@@ -285,56 +326,110 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
     return response.choices[0].message.content
 
 # ---------------------------------------------------------------------------
-# Helper: parse element detections from API response
-# Returns a list of dicts:
-# [{"name": "Cable Tray 1", "bbox": (l,t,r,b), "severity": "PASS", "lines": [...]}, ...]
+# Helper: parse GPT-5.5 response into structured element list
 # ---------------------------------------------------------------------------
-def parse_elements(response_text: str) -> list:
+def parse_response(response_text: str, category: str) -> list:
+    """
+    Returns a list of dicts:
+    [{"element_type": "distribution_panel", "label": "Distribution Panel 1",
+      "count_index": 0, "total_count": 3, "severity": "FLAG FOR REVIEW",
+      "criteria": ["C1: PASS...", ...]}, ...]
+    """
     elements = []
-    current = None
+    lines = response_text.splitlines()
 
-    for line in response_text.splitlines():
-        line = line.strip()
-        if not line:
+    # Determine element type key from category
+    if "Cable Tray" in category:
+        primary_key  = "cable_tray"
+        primary_label = "Cable Tray"
+        count_pattern = r"CABLE TRAY COUNT\s*:\s*(\d+)"
+        block_pattern = r"CABLE TRAY (\d+)\s*:"
+    elif "Distribution Panel" in category:
+        primary_key  = "distribution_panel"
+        primary_label = "Distribution Panel"
+        count_pattern = r"DISTRIBUTION PANEL COUNT\s*:\s*(\d+)"
+        block_pattern = r"DISTRIBUTION PANEL (\d+)\s*:"
+    else:
+        primary_key  = "cable_run"
+        primary_label = "Cable Run"
+        count_pattern = r"CABLE RUN COUNT\s*:\s*(\d+)"
+        block_pattern = r"CABLE RUN (\d+)\s*:"
+
+    # Extract declared count
+    total_count = 1
+    for line in lines:
+        m = re.search(count_pattern, line, re.IGNORECASE)
+        if m:
+            total_count = max(1, int(m.group(1)))
+            break
+
+    # Parse individual element blocks
+    current_elem = None
+    for line in lines:
+        line_s = line.strip()
+
+        # New primary element block
+        bm = re.match(block_pattern, line_s, re.IGNORECASE)
+        if bm:
+            if current_elem:
+                elements.append(current_elem)
+            idx = int(bm.group(1)) - 1
+            current_elem = {
+                "element_type": primary_key,
+                "label": f"{primary_label} {bm.group(1)}",
+                "count_index": idx,
+                "total_count": total_count,
+                "severity": "CANNOT DETERMINE",
+                "criteria": []
+            }
             continue
 
-        if line.upper().startswith("ELEMENT:"):
-            if current:
-                elements.append(current)
-            current = {
-                "name": line.split(":", 1)[1].strip(),
-                "bbox": None,
+        # Floor / clearance block
+        if re.match(r"FLOOR\s*/?\s*(WORKING CLEARANCE|CABLES)\s*:", line_s, re.IGNORECASE):
+            if current_elem:
+                elements.append(current_elem)
+            etype = "floor_clearance" if "CLEARANCE" in line_s.upper() else "loose_cables"
+            current_elem = {
+                "element_type": etype,
+                "label": "Floor / Working Clearance" if etype == "floor_clearance" else "Floor Cables",
+                "count_index": 0,
+                "total_count": 1,
                 "severity": "CANNOT DETERMINE",
-                "criteria_lines": []
+                "criteria": []
             }
+            continue
 
-        elif line.upper().startswith("BBOX:") and current:
-            try:
-                raw = line.split(":", 1)[1].strip()
-                parts = [float(x.strip()) for x in raw.split(",")]
-                if len(parts) == 4:
-                    # Clamp values to 0.0–1.0
-                    parts = [max(0.0, min(1.0, p)) for p in parts]
-                    current["bbox"] = tuple(parts)
-            except Exception:
-                pass
+        if current_elem is None:
+            continue
 
-        elif line.upper().startswith("ELEMENT SEVERITY:") and current:
-            sev_raw = line.split(":", 1)[1].strip().upper()
+        # Severity line
+        if re.match(r"SEVERITY\s*:", line_s, re.IGNORECASE):
+            sev_raw = line_s.split(":", 1)[1].strip().upper()
             if "NOT APPLICABLE" in sev_raw:
-                current["severity"] = "NOT APPLICABLE"
+                current_elem["severity"] = "NOT APPLICABLE"
             elif "FAIL" in sev_raw:
-                current["severity"] = "FAIL"
+                current_elem["severity"] = "FAIL"
             elif "FLAG" in sev_raw:
-                current["severity"] = "FLAG FOR REVIEW"
+                current_elem["severity"] = "FLAG FOR REVIEW"
             elif "PASS" in sev_raw:
-                current["severity"] = "PASS"
+                current_elem["severity"] = "PASS"
+            continue
 
-        elif line.upper().startswith("CRITERION") and current:
-            current["criteria_lines"].append(line)
+        # Loose cables present line
+        if re.match(r"LOOSE CABLES PRESENT\s*:", line_s, re.IGNORECASE):
+            val = line_s.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                current_elem["severity"] = "FAIL"
+            elif "NO" in val:
+                current_elem["severity"] = "PASS"
+            continue
 
-    if current:
-        elements.append(current)
+        # Criterion lines
+        if re.match(r"CRITERION\s+\d", line_s, re.IGNORECASE):
+            current_elem["criteria"].append(line_s)
+
+    if current_elem:
+        elements.append(current_elem)
 
     return elements
 
@@ -344,95 +439,134 @@ def parse_elements(response_text: str) -> list:
 def extract_overall_result(response_text: str) -> str:
     for line in response_text.splitlines():
         if line.strip().upper().startswith("OVERALL RESULT:"):
-            value = line.split(":", 1)[1].strip().upper()
-            if "FAIL" in value:
+            val = line.split(":", 1)[1].strip().upper()
+            if "FAIL" in val:
                 return "FAIL"
-            elif "FLAG" in value:
+            elif "FLAG" in val:
                 return "FLAG FOR REVIEW"
-            elif "PASS" in value:
+            elif "PASS" in val:
                 return "PASS"
     return "CANNOT DETERMINE"
 
 # ---------------------------------------------------------------------------
-# Helper: draw element bounding boxes on image
+# Helper: draw rule-based boxes on image
 # ---------------------------------------------------------------------------
 def annotate_image(image: Image.Image, elements: list) -> Image.Image:
     w, h = image.size
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # Font — try system font first, fall back to default
     font_size = max(16, w // 45)
     try:
         font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            size=font_size
-        )
-        font_small = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=font_size)
+        font_sm = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            size=max(13, w // 60)
-        )
+            size=max(13, w // 60))
     except Exception:
         font = ImageFont.load_default()
-        font_small = font
+        font_sm = font
 
+    # Group elements by type to calculate column layouts
+    from collections import defaultdict
+    type_groups = defaultdict(list)
     for elem in elements:
-        bbox = elem.get("bbox")
-        severity = elem.get("severity", "CANNOT DETERMINE")
-        name = elem.get("name", "Element")
+        type_groups[elem["element_type"]].append(elem)
 
-        if not bbox:
-            continue
+    for etype, group in type_groups.items():
+        count = len(group)
+        boxes = compute_boxes(etype, count, w, h)
 
-        # Convert normalised coords to pixels
-        x0 = int(bbox[0] * w)
-        y0 = int(bbox[1] * h)
-        x1 = int(bbox[2] * w)
-        y1 = int(bbox[3] * h)
+        for i, (elem, box) in enumerate(zip(group, boxes)):
+            x0, y0, x1, y1 = box
+            severity = elem["severity"]
 
-        # Ensure box has minimum size for visibility
-        if x1 - x0 < 20:
-            x1 = x0 + 20
-        if y1 - y0 < 20:
-            y1 = y0 + 20
+            fill   = SEVERITY_FILL.get(severity,   (150, 150, 150, 40))
+            border = SEVERITY_BORDER.get(severity, (120, 120, 120, 200))
+            tcolour = SEVERITY_TEXT.get(severity,  (80,  80,  80))
 
-        fill   = SEVERITY_FILL.get(severity,   (150, 150, 150, 40))
-        border = SEVERITY_BORDER.get(severity, (120, 120, 120, 200))
-        tcolour = SEVERITY_TEXT.get(severity,  (80,  80,  80))
+            # Main box
+            draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border, width=3)
 
-        # Draw filled rectangle with border
-        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border, width=3)
+            # Label tag at top of box
+            label_text = f"{elem['label']}  |  {severity}"
+            try:
+                tb = draw.textbbox((0, 0), label_text, font=font_sm)
+                tw = tb[2] - tb[0]
+                th = tb[3] - tb[1]
+            except Exception:
+                tw = len(label_text) * 7
+                th = 14
 
-        # Label background pill at top of box
-        label_text = f"{name} | {severity}"
-        try:
-            bbox_text = draw.textbbox((0, 0), label_text, font=font_small)
-            text_w = bbox_text[2] - bbox_text[0]
-            text_h = bbox_text[3] - bbox_text[1]
-        except Exception:
-            text_w, text_h = len(label_text) * 7, 14
+            pad = 5
+            lx0 = x0
+            ly0 = max(0, y0 - th - pad * 2)
+            lx1 = min(w, x0 + tw + pad * 2)
+            ly1 = y0
 
-        pad = 4
-        lx0 = x0
-        ly0 = max(0, y0 - text_h - pad * 2)
-        lx1 = min(w, x0 + text_w + pad * 2)
-        ly1 = max(0, y0)
-
-        # Draw label background
-        label_bg = border[:3] + (200,)
-        draw.rectangle([lx0, ly0, lx1, ly1], fill=label_bg)
-
-        # Draw label text
-        draw.text(
-            (lx0 + pad, ly0 + pad),
-            label_text,
-            fill=(255, 255, 255),
-            font=font_small
-        )
+            tag_bg = border[:3] + (210,)
+            draw.rectangle([lx0, ly0, lx1, ly1], fill=tag_bg)
+            draw.text((lx0 + pad, ly0 + pad), label_text,
+                      fill=(255, 255, 255), font=font_sm)
 
     base = image.convert("RGBA")
     combined = Image.alpha_composite(base, overlay)
     return combined.convert("RGB")
+
+# ---------------------------------------------------------------------------
+# Helper: render full results to screen
+# ---------------------------------------------------------------------------
+def render_results(image: Image.Image, response_text: str, cat: str):
+    elements = parse_response(response_text, cat)
+    overall  = extract_overall_result(response_text)
+
+    # Annotated image
+    if elements:
+        annotated = annotate_image(image, elements)
+        st.image(annotated,
+                 caption="Annotated output — colour-coded by element and severity",
+                 use_container_width=True)
+    else:
+        st.image(image, caption="No elements parsed from response",
+                 use_container_width=True)
+
+    # Overall result banner
+    if overall == "PASS":
+        st.success(f"Overall Result: {overall}")
+    elif overall == "FLAG FOR REVIEW":
+        st.warning(f"Overall Result: {overall}")
+    elif overall == "FAIL":
+        st.error(f"Overall Result: {overall}")
+    else:
+        st.info(f"Overall Result: {overall}")
+
+    # Elements summary table
+    if elements:
+        st.subheader("Detected Elements")
+        for elem in elements:
+            c1, c2 = st.columns([3, 2])
+            c1.write(elem["label"])
+            sev = elem["severity"]
+            if sev == "PASS":
+                c2.success(sev)
+            elif sev == "FLAG FOR REVIEW":
+                c2.warning(sev)
+            elif sev == "FAIL":
+                c2.error(sev)
+            else:
+                c2.info(sev)
+
+            # Show criteria detail under each element
+            if elem["criteria"]:
+                with st.expander(f"Criteria detail — {elem['label']}"):
+                    for cline in elem["criteria"]:
+                        st.write(cline)
+
+    # Full raw report
+    with st.expander("Full Assessment Report", expanded=False):
+        st.text(response_text)
+
+    return overall
 
 # ---------------------------------------------------------------------------
 # Helper: extract frames from video
@@ -453,65 +587,10 @@ def extract_frames(video_path: str, interval_seconds: int, max_frames: int) -> l
         if not ret:
             break
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(rgb)
-        timestamp = frame_index / fps
-        frames.append((pil_image, timestamp))
+        frames.append((Image.fromarray(rgb), frame_index / fps))
         frame_index += frame_step
     cap.release()
     return frames
-
-# ---------------------------------------------------------------------------
-# Helper: render inspection results to screen
-# ---------------------------------------------------------------------------
-def render_results(image, response_text):
-    elements = parse_elements(response_text)
-    overall  = extract_overall_result(response_text)
-
-    # Annotated image
-    if elements:
-        annotated = annotate_image(image, elements)
-        st.image(
-            annotated,
-            caption="Annotated output — bounding boxes colour-coded by severity",
-            use_container_width=True
-        )
-    else:
-        st.image(image, caption="No elements detected", use_container_width=True)
-
-    # Overall result banner
-    if overall == "PASS":
-        st.success(f"Overall Result: {overall}")
-    elif overall == "FLAG FOR REVIEW":
-        st.warning(f"Overall Result: {overall}")
-    elif overall == "FAIL":
-        st.error(f"Overall Result: {overall}")
-    else:
-        st.info(f"Overall Result: {overall}")
-
-    # Elements summary table
-    if elements:
-        st.subheader("Detected Elements")
-        cols = st.columns([3, 2])
-        cols[0].markdown("**Element**")
-        cols[1].markdown("**Severity**")
-        for elem in elements:
-            c1, c2 = st.columns([3, 2])
-            c1.write(elem["name"])
-            sev = elem["severity"]
-            if sev == "PASS":
-                c2.success(sev)
-            elif sev == "FLAG FOR REVIEW":
-                c2.warning(sev)
-            elif sev == "FAIL":
-                c2.error(sev)
-            else:
-                c2.info(sev)
-
-    # Full written report
-    with st.expander("Full Assessment Report", expanded=True):
-        st.text(response_text)
-
-    return overall, elements
 
 # ---------------------------------------------------------------------------
 # Main application logic
@@ -521,8 +600,7 @@ prompt_text = PROMPTS[category]
 if input_mode == "Single Photograph":
     uploaded_file = st.file_uploader(
         "Upload site photograph",
-        type=["jpg", "jpeg", "png"],
-        help="Upload a clear site photograph of the electrical installation."
+        type=["jpg", "jpeg", "png"]
     )
 
     if uploaded_file:
@@ -537,21 +615,17 @@ if input_mode == "Single Photograph":
                     try:
                         image_b64 = encode_image_to_base64(image)
                         response_text = call_gpt_vision(api_key, image_b64, prompt_text)
-                        render_results(image, response_text)
+                        render_results(image, response_text, category)
                     except Exception as e:
                         st.error(f"API request failed: {e}")
 
 elif input_mode == "Video Walkthrough":
     if not CV2_AVAILABLE:
-        st.error(
-            "OpenCV is required for video mode. "
-            "Install it with: pip install opencv-python"
-        )
+        st.error("OpenCV is required for video mode.")
     else:
         uploaded_video = st.file_uploader(
             "Upload video walkthrough",
-            type=["mp4", "mov", "avi"],
-            help="Upload a recorded site walkthrough video."
+            type=["mp4", "mov", "avi"]
         )
 
         if uploaded_video:
@@ -575,8 +649,8 @@ elif input_mode == "Video Walkthrough":
                     else:
                         st.info(f"{len(frames)} frame(s) extracted. Sending to GPT-5.5...")
                         progress = st.progress(0)
-
                         results = []
+
                         for i, (frame_image, timestamp) in enumerate(frames):
                             with st.spinner(
                                 f"Analysing frame {i+1} of {len(frames)} "
@@ -585,17 +659,11 @@ elif input_mode == "Video Walkthrough":
                                 try:
                                     image_b64 = encode_image_to_base64(frame_image)
                                     response_text = call_gpt_vision(
-                                        api_key, image_b64, prompt_text
-                                    )
-                                    overall, elements = render_results.__wrapped__ \
-                                        if hasattr(render_results, '__wrapped__') \
-                                        else (extract_overall_result(response_text),
-                                              parse_elements(response_text))
+                                        api_key, image_b64, prompt_text)
                                     results.append({
                                         "frame": i + 1,
                                         "timestamp": timestamp,
                                         "image": frame_image,
-                                        "elements": parse_elements(response_text),
                                         "overall": extract_overall_result(response_text),
                                         "report": response_text
                                     })
@@ -604,7 +672,6 @@ elif input_mode == "Video Walkthrough":
                                         "frame": i + 1,
                                         "timestamp": timestamp,
                                         "image": frame_image,
-                                        "elements": [],
                                         "overall": "ERROR",
                                         "report": str(e)
                                     })
@@ -630,16 +697,13 @@ elif input_mode == "Video Walkthrough":
                         else:
                             st.success("Worst-case result across session: PASS")
 
-                        # Per-frame expandable results
                         st.subheader("Frame-by-Frame Results")
                         for r in results:
-                            label = (
-                                f"Frame {r['frame']} | "
-                                f"t={r['timestamp']:.1f}s | "
+                            with st.expander(
+                                f"Frame {r['frame']} | t={r['timestamp']:.1f}s | "
                                 f"Result: {r['overall']}"
-                            )
-                            with st.expander(label):
-                                render_results(r["image"], r["report"])
+                            ):
+                                render_results(r["image"], r["report"], category)
 
                     os.unlink(tmp_path)
 
