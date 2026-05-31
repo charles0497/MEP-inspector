@@ -204,7 +204,7 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
         return "ERROR: openai package is not installed."
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
-        model="gpt-5.5-2026-04-23",
+        model="gpt-4o",
         max_completion_tokens=2000,
         messages=[
             {
