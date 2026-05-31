@@ -15,10 +15,10 @@ except ImportError:
     CV2_AVAILABLE = False
 
 try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
+    ANTHROPIC_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -50,9 +50,9 @@ with st.sidebar:
     st.header("Settings")
 
     api_key = st.text_input(
-        "OpenAI API Key",
+        "Anthropic API Key",
         type="password",
-        help="Enter your OpenAI API key. It is not stored after the session ends."
+        help="Enter your Anthropic API key. It is not stored after the session ends."
     )
 
     category = st.selectbox(
@@ -90,22 +90,16 @@ SEVERITY_BORDER = {
 }
 
 # ---------------------------------------------------------------------------
-# Simplified prompts — shorter, outcome-focused, no rigid format demands
-# GPT-5.5 is asked for structured JSON-like output but given freedom in phrasing
+# Prompts — same logic, natural language, outcome-focused
 # ---------------------------------------------------------------------------
 PROMPTS = {
-    "Cable Tray Condition and Fill Level": """
-You are assisting with a preliminary electrical installation inspection under \
-SS 638 (Singapore Code of Practice for Electrical Installations).
+    "Cable Tray Condition and Fill Level": """You are assisting with a preliminary electrical installation inspection under SS 638 (Singapore Code of Practice for Electrical Installations).
 
-Look at this construction site photograph. Identify all visible cable trays and \
-trunking runs. For each one, assess the following and give a verdict of PASS, \
-FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+Look at this construction site photograph. Identify all visible cable trays and trunking runs. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
 
 1. Fill level — does the tray appear to exceed 40% fill of its cross-section?
 2. Tray condition — any visible crushing, cracking, or deformation?
-3. Earth conductor — are yellow-green earth continuity conductors visible \
-running alongside the power cables?
+3. Earth conductor — are yellow-green earth continuity conductors visible running alongside the power cables?
 
 Also note whether any loose cables are lying on the floor.
 
@@ -118,13 +112,9 @@ At the end write:
 - "Summary: [two sentences]"
 """,
 
-    "Distribution Panel Condition": """
-You are assisting with a preliminary electrical installation inspection under \
-SS 638 (Singapore Code of Practice for Electrical Installations).
+    "Distribution Panel Condition": """You are assisting with a preliminary electrical installation inspection under SS 638 (Singapore Code of Practice for Electrical Installations).
 
-Look at this construction site photograph. Identify all visible distribution \
-panels and switchboards. For each one, assess the following and give a verdict \
-of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+Look at this construction site photograph. Identify all visible distribution panels and switchboards. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
 
 1. Panel condition — are doors closed, undamaged, with no exposed live parts?
 2. Labelling — are warning signs and identification markings visible on the panel face?
@@ -141,13 +131,9 @@ At the end write:
 - "Summary: [two sentences]"
 """,
 
-    "Cable Support, Identification and Loose Cables": """
-You are assisting with a preliminary electrical installation inspection under \
-SS 638 (Singapore Code of Practice for Electrical Installations).
+    "Cable Support, Identification and Loose Cables": """You are assisting with a preliminary electrical installation inspection under SS 638 (Singapore Code of Practice for Electrical Installations).
 
-Look at this construction site photograph. Identify all visible cable runs and \
-cable groups. For each one, assess the following and give a verdict of PASS, \
-FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+Look at this construction site photograph. Identify all visible cable runs and cable groups. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
 
 1. Cable support — are cables secured at intervals with no unsupported hanging loops?
 2. Cable identification — are cables colour-coded or labelled consistently?
@@ -197,39 +183,43 @@ def encode_image_to_base64(image: Image.Image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 # ---------------------------------------------------------------------------
-# Helper: call GPT-5.5
+# Helper: call Claude Opus 4.7
 # ---------------------------------------------------------------------------
-def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
-    if not OPENAI_AVAILABLE:
-        return "ERROR: openai package is not installed."
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        max_completion_tokens=2000,
+def call_claude_vision(api_key: str, image_b64: str, prompt: str) -> str:
+    if not ANTHROPIC_AVAILABLE:
+        return "ERROR: anthropic package is not installed."
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    message = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=2000,
         messages=[
             {
                 "role": "user",
                 "content": [
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}",
-                            "detail": "high"
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_b64
                         }
                     },
-                    {"type": "text", "text": prompt}
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
                 ]
             }
         ]
     )
-    return response.choices[0].message.content
+    return message.content[0].text
 
 # ---------------------------------------------------------------------------
-# Helper: flexible parser — scans response text for element mentions
-# and verdict keywords regardless of exact formatting
+# Helper: extract severity from a block of text
 # ---------------------------------------------------------------------------
 def extract_severity(text: str) -> str:
-    """Extract the strongest severity verdict from a block of text."""
     text_up = text.upper()
     if "FAIL" in text_up:
         return "FAIL"
@@ -239,19 +229,16 @@ def extract_severity(text: str) -> str:
         return "PASS"
     return "CANNOT DETERMINE"
 
+# ---------------------------------------------------------------------------
+# Helper: flexible parser
+# ---------------------------------------------------------------------------
 def parse_response(response_text: str, category: str) -> list:
-    """
-    Flexibly parses the response regardless of exact formatting.
-    Looks for lines mentioning element types and extracts verdict.
-    Returns list of element dicts for annotation.
-    """
     if not response_text or not response_text.strip():
         return []
 
     elements = []
     lines = response_text.splitlines()
 
-    # Determine what element type to look for
     if "Cable Tray" in category:
         primary_pattern = re.compile(r"cable\s*tray\s*(\d+)", re.IGNORECASE)
         primary_type    = "cable_tray"
@@ -265,44 +252,73 @@ def parse_response(response_text: str, category: str) -> list:
         primary_type    = "cable_run"
         primary_label   = "Cable Run"
 
-    floor_pattern = re.compile(
+    floor_pattern   = re.compile(
         r"(floor|working\s*clearance|loose\s*cable)", re.IGNORECASE)
-    overall_pattern = re.compile(r"overall\s*:?\s*(pass|flag for review|fail)",
-                                 re.IGNORECASE)
+    overall_pattern = re.compile(
+        r"overall\s*:?\s*(pass|flag for review|fail)", re.IGNORECASE)
+    verdict_pattern = re.compile(
+        r"verdict\s*:?\s*(pass|flag for review|fail|cannot determine)",
+        re.IGNORECASE)
 
-    found_indices = set()
+    found_indices  = set()
+    current_elem   = None
+    current_lines  = []
+
+    def finalise_element(elem, collected_lines):
+        """Look through collected lines for a verdict keyword."""
+        if not elem:
+            return
+        combined = " ".join(collected_lines)
+        vm = verdict_pattern.search(combined)
+        if vm:
+            elem["severity"] = extract_severity(vm.group(1))
+        else:
+            elem["severity"] = extract_severity(combined)
+        elements.append(elem)
 
     for line in lines:
-        # Primary elements
+        # Check for new primary element
         m = primary_pattern.search(line)
         if m:
+            finalise_element(current_elem, current_lines)
             idx = int(m.group(1))
             if idx not in found_indices:
                 found_indices.add(idx)
-                severity = extract_severity(line)
-                elements.append({
+                current_elem = {
                     "element_type": primary_type,
-                    "label": f"{primary_label} {idx}",
-                    "count_index": idx - 1,
-                    "severity": severity,
-                    "text": line.strip()
-                })
+                    "label":        f"{primary_label} {idx}",
+                    "count_index":  idx - 1,
+                    "severity":     "CANNOT DETERMINE",
+                    "text":         line.strip()
+                }
+                current_lines = [line]
+            continue
 
-        # Floor / clearance
-        elif floor_pattern.search(line) and "overall" not in line.lower():
-            severity = extract_severity(line)
-            # Only add once
+        # Check for floor element
+        if floor_pattern.search(line) and "overall" not in line.lower():
+            finalise_element(current_elem, current_lines)
             if not any(e["element_type"] == "floor" for e in elements):
-                elements.append({
+                current_elem = {
                     "element_type": "floor",
-                    "label": "Floor / Clearance",
-                    "count_index": 0,
-                    "severity": severity,
-                    "text": line.strip()
-                })
+                    "label":        "Floor / Clearance",
+                    "count_index":  0,
+                    "severity":     "CANNOT DETERMINE",
+                    "text":         line.strip()
+                }
+                current_lines = [line]
+            else:
+                current_elem  = None
+                current_lines = []
+            continue
 
-    # If no elements parsed but response is non-empty,
-    # create a single generic element so the box still renders
+        # Accumulate lines for current element
+        if current_elem is not None:
+            current_lines.append(line)
+
+    # Finalise last element
+    finalise_element(current_elem, current_lines)
+
+    # Fallback — if nothing parsed but response exists, create single element
     if not elements and response_text.strip():
         overall = "CANNOT DETERMINE"
         for line in lines:
@@ -312,10 +328,10 @@ def parse_response(response_text: str, category: str) -> list:
                 break
         elements.append({
             "element_type": primary_type,
-            "label": primary_label,
-            "count_index": 0,
-            "severity": overall,
-            "text": response_text[:200]
+            "label":        primary_label,
+            "count_index":  0,
+            "severity":     overall,
+            "text":         response_text[:200]
         })
 
     return elements
@@ -335,7 +351,6 @@ def extract_overall_result(response_text: str) -> str:
                 return "FLAG FOR REVIEW"
             elif "PASS" in val:
                 return "PASS"
-    # Fall back to scanning full text
     return extract_severity(response_text)
 
 # ---------------------------------------------------------------------------
@@ -344,21 +359,20 @@ def extract_overall_result(response_text: str) -> str:
 def annotate_image(image: Image.Image, elements: list) -> Image.Image:
     w, h = image.size
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    draw    = ImageDraw.Draw(overlay)
 
     font_size = max(16, w // 45)
     try:
-        font = ImageFont.truetype(
+        font    = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             size=font_size)
         font_sm = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             size=max(13, w // 60))
     except Exception:
-        font = ImageFont.load_default()
+        font    = ImageFont.load_default()
         font_sm = font
 
-    # Group by element type for column layout
     type_groups = defaultdict(list)
     for elem in elements:
         type_groups[elem["element_type"]].append(elem)
@@ -370,14 +384,12 @@ def annotate_image(image: Image.Image, elements: list) -> Image.Image:
         for elem, box in zip(group, boxes):
             x0, y0, x1, y1 = box
             severity = elem["severity"]
-
-            fill   = SEVERITY_FILL.get(severity,   (150, 150, 150, 40))
-            border = SEVERITY_BORDER.get(severity, (120, 120, 120, 200))
+            fill     = SEVERITY_FILL.get(severity,   (150, 150, 150, 40))
+            border   = SEVERITY_BORDER.get(severity, (120, 120, 120, 200))
 
             draw.rectangle([x0, y0, x1, y1],
                            fill=fill, outline=border, width=3)
 
-            # Label tag
             label_text = f"{elem['label']}  |  {severity}"
             try:
                 tb = draw.textbbox((0, 0), label_text, font=font_sm)
@@ -413,7 +425,6 @@ def render_results(image: Image.Image, response_text: str, cat: str):
     elements = parse_response(response_text, cat)
     overall  = extract_overall_result(response_text)
 
-    # Annotated image
     if elements:
         annotated = annotate_image(image, elements)
         st.image(annotated,
@@ -422,7 +433,6 @@ def render_results(image: Image.Image, response_text: str, cat: str):
     else:
         st.image(image, caption="Uploaded photograph", use_container_width=True)
 
-    # Overall result banner
     if overall == "PASS":
         st.success(f"Overall Result: {overall}")
     elif overall == "FLAG FOR REVIEW":
@@ -432,7 +442,6 @@ def render_results(image: Image.Image, response_text: str, cat: str):
     else:
         st.info(f"Overall Result: {overall}")
 
-    # Element summary
     if elements:
         st.subheader("Detected Elements")
         for elem in elements:
@@ -448,7 +457,6 @@ def render_results(image: Image.Image, response_text: str, cat: str):
             else:
                 c2.info(sev)
 
-    # Full report
     with st.expander("Full Assessment Report", expanded=True):
         st.write(response_text)
 
@@ -461,10 +469,10 @@ def extract_frames(video_path: str, interval_seconds: int,
                    max_frames: int) -> list:
     if not CV2_AVAILABLE:
         return []
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    cap        = cv2.VideoCapture(video_path)
+    fps        = cap.get(cv2.CAP_PROP_FPS) or 25
     frame_step = int(fps * interval_seconds)
-    frames = []
+    frames     = []
     frame_index = 0
     while len(frames) < max_frames:
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
@@ -494,12 +502,12 @@ if input_mode == "Single Photograph":
 
         if st.button("Run Inspection", type="primary"):
             if not api_key:
-                st.error("Please enter your OpenAI API key in the sidebar.")
+                st.error("Please enter your Anthropic API key in the sidebar.")
             else:
-                with st.spinner("Sending to GPT-5.5 for analysis..."):
+                with st.spinner("Sending to Claude Opus 4.7 for analysis..."):
                     try:
-                        image_b64 = encode_image_to_base64(image)
-                        response_text = call_gpt_vision(
+                        image_b64     = encode_image_to_base64(image)
+                        response_text = call_claude_vision(
                             api_key, image_b64, prompt_text)
                         render_results(image, response_text, category)
                     except Exception as e:
@@ -526,16 +534,19 @@ elif input_mode == "Video Walkthrough":
 
             if st.button("Extract Frames and Run Inspection", type="primary"):
                 if not api_key:
-                    st.error("Please enter your OpenAI API key in the sidebar.")
+                    st.error(
+                        "Please enter your Anthropic API key in the sidebar.")
                 else:
-                    frames = extract_frames(tmp_path, frame_interval, max_frames)
+                    frames = extract_frames(
+                        tmp_path, frame_interval, max_frames)
 
                     if not frames:
-                        st.error("No frames could be extracted from the video.")
+                        st.error(
+                            "No frames could be extracted from the video.")
                     else:
                         st.info(
                             f"{len(frames)} frame(s) extracted. "
-                            "Sending to GPT-5.5...")
+                            "Sending to Claude Opus 4.7...")
                         progress = st.progress(0)
                         results  = []
 
@@ -547,7 +558,7 @@ elif input_mode == "Video Walkthrough":
                                 try:
                                     image_b64 = encode_image_to_base64(
                                         frame_image)
-                                    response_text = call_gpt_vision(
+                                    response_text = call_claude_vision(
                                         api_key, image_b64, prompt_text)
                                     results.append({
                                         "frame":     i + 1,
