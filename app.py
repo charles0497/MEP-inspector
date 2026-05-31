@@ -5,8 +5,9 @@ import base64
 import tempfile
 import os
 import re
+from collections import defaultdict
 
-# Optional dependencies — handled gracefully if not installed
+# Optional dependencies
 try:
     import cv2
     CV2_AVAILABLE = True
@@ -75,7 +76,7 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Colour scheme
 # ---------------------------------------------------------------------------
-SEVERITY_FILL   = {
+SEVERITY_FILL = {
     "PASS":             (0,   200,   0,  55),
     "FLAG FOR REVIEW":  (255, 165,   0,  55),
     "FAIL":             (220,   0,   0,  55),
@@ -87,207 +88,105 @@ SEVERITY_BORDER = {
     "FAIL":             (180,   0,   0, 240),
     "CANNOT DETERMINE": (120, 120, 120, 200),
 }
-SEVERITY_TEXT   = {
-    "PASS":             (0,   100,   0),
-    "FLAG FOR REVIEW":  (150,  90,   0),
-    "FAIL":             (150,   0,   0),
-    "CANNOT DETERMINE": ( 80,  80,  80),
+
+# ---------------------------------------------------------------------------
+# Simplified prompts — shorter, outcome-focused, no rigid format demands
+# GPT-5.5 is asked for structured JSON-like output but given freedom in phrasing
+# ---------------------------------------------------------------------------
+PROMPTS = {
+    "Cable Tray Condition and Fill Level": """
+You are assisting with a preliminary electrical installation inspection under \
+SS 638 (Singapore Code of Practice for Electrical Installations).
+
+Look at this construction site photograph. Identify all visible cable trays and \
+trunking runs. For each one, assess the following and give a verdict of PASS, \
+FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+
+1. Fill level — does the tray appear to exceed 40% fill of its cross-section?
+2. Tray condition — any visible crushing, cracking, or deformation?
+3. Earth conductor — are yellow-green earth continuity conductors visible \
+running alongside the power cables?
+
+Also note whether any loose cables are lying on the floor.
+
+Count how many cable trays you can see. Then for each one write:
+- "Cable Tray [N]: [your findings and verdict]"
+
+At the end write:
+- "Floor cables: [YES/NO loose cables on floor]"
+- "Overall: [PASS / FLAG FOR REVIEW / FAIL]"
+- "Summary: [two sentences]"
+""",
+
+    "Distribution Panel Condition": """
+You are assisting with a preliminary electrical installation inspection under \
+SS 638 (Singapore Code of Practice for Electrical Installations).
+
+Look at this construction site photograph. Identify all visible distribution \
+panels and switchboards. For each one, assess the following and give a verdict \
+of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+
+1. Panel condition — are doors closed, undamaged, with no exposed live parts?
+2. Labelling — are warning signs and identification markings visible on the panel face?
+3. Integrity — any visible burn marks, corrosion, or physical damage?
+
+Also check the floor area in front of panels for working clearance and loose items.
+
+Count how many panels you can see. Then for each one write:
+- "Distribution Panel [N]: [your findings and verdict]"
+
+At the end write:
+- "Floor / Working Clearance: [your finding and verdict]"
+- "Overall: [PASS / FLAG FOR REVIEW / FAIL]"
+- "Summary: [two sentences]"
+""",
+
+    "Cable Support, Identification and Loose Cables": """
+You are assisting with a preliminary electrical installation inspection under \
+SS 638 (Singapore Code of Practice for Electrical Installations).
+
+Look at this construction site photograph. Identify all visible cable runs and \
+cable groups. For each one, assess the following and give a verdict of PASS, \
+FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+
+1. Cable support — are cables secured at intervals with no unsupported hanging loops?
+2. Cable identification — are cables colour-coded or labelled consistently?
+
+Also check whether any loose or stray cables are lying on the floor.
+
+Count how many distinct cable runs you can see. Then for each one write:
+- "Cable Run [N]: [your findings and verdict]"
+
+At the end write:
+- "Floor cables: [YES/NO loose cables on floor]"
+- "Overall: [PASS / FLAG FOR REVIEW / FAIL]"
+- "Summary: [two sentences]"
+"""
 }
 
 # ---------------------------------------------------------------------------
-# Rule-based layout engine
-#
-# Based on observed patterns across site photographs:
-#   - Cable trays occupy the top ~35% of the frame
-#   - Distribution panels occupy the middle ~40%
-#   - Floor / working clearance occupies the bottom ~25%
-#
-# When the model reports N instances of an element type, this engine
-# divides the relevant band into N equal vertical columns and draws
-# one box per instance within that band.
+# Rule-based layout for drawing boxes
 # ---------------------------------------------------------------------------
-
 ELEMENT_BANDS = {
-    # element_type_key : (top_fraction, bottom_fraction)
-    "cable_tray":        (0.00, 0.38),
-    "distribution_panel":(0.30, 0.78),
-    "floor_clearance":   (0.72, 1.00),
-    "cable_run":         (0.00, 0.75),
-    "loose_cables":      (0.72, 1.00),
+    "cable_tray":         (0.00, 0.38),
+    "distribution_panel": (0.28, 0.78),
+    "cable_run":          (0.00, 0.75),
+    "floor":              (0.73, 1.00),
 }
 
-def compute_boxes(element_type: str, count: int, img_w: int, img_h: int,
-                  h_margin: float = 0.03) -> list:
-    """
-    Divide the element band into `count` equal vertical columns.
-    Returns a list of pixel-coordinate tuples (x0, y0, x1, y1).
-    """
-    band = ELEMENT_BANDS.get(element_type)
-    if not band:
-        band = (0.10, 0.90)
-
+def compute_boxes(element_type: str, count: int,
+                  img_w: int, img_h: int) -> list:
+    band = ELEMENT_BANDS.get(element_type, (0.10, 0.90))
     y0 = int(band[0] * img_h)
     y1 = int(band[1] * img_h)
-
     col_w = img_w / max(count, 1)
-    margin = int(h_margin * img_w)
-
+    margin = int(0.02 * img_w)
     boxes = []
     for i in range(count):
         bx0 = int(i * col_w) + margin
         bx1 = int((i + 1) * col_w) - margin
         boxes.append((bx0, y0, bx1, y1))
     return boxes
-
-# ---------------------------------------------------------------------------
-# Prompts — GPT-5.5 identifies element types and counts, assesses criteria
-# ---------------------------------------------------------------------------
-PROMPTS = {
-    "Cable Tray Condition and Fill Level": """
-You are an AI-assisted preliminary screening tool supporting electrical installation \
-inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
-and EMA regulations.
-
-Carefully examine the image and identify all visible cable trays, trunking runs, \
-and cable ladders. Count how many distinct cable tray sections are visible.
-
-For EACH cable tray section, assess the following criteria using only what is \
-clearly visible. Do not guess if something is not visible.
-
-Criterion 1 (SS 638 Clause 522 — Fill Level):
-Cable tray fill level does not visually appear to exceed approximately 40% of the \
-cross-sectional tray area.
-
-Criterion 2 (SS 638 Clause 522 — Tray Condition):
-Cable tray structure appears undamaged with no visible crushing, cracking, or deformation.
-
-Criterion 3 (SS 638 Clause 543 — Earth Continuity Conductor):
-Yellow and green earth continuity conductors are visible and appear to run continuously \
-alongside power cables.
-
-Also check the floor area and report whether loose cables are present on the floor.
-
-Respond in this EXACT format:
-
-CABLE TRAY COUNT: [number]
-
-CABLE TRAY 1:
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-CABLE TRAY 2:
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-(repeat for each tray found)
-
-FLOOR CABLES:
-LOOSE CABLES PRESENT: [YES / NO]
-SEVERITY: [FAIL / PASS]
-
-OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
-SUMMARY: [Two to three sentences on the most significant findings.]
-""",
-
-    "Distribution Panel Condition": """
-You are an AI-assisted preliminary screening tool supporting electrical installation \
-inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
-and EMA regulations.
-
-Carefully examine the image and identify all visible distribution panels, switchboards, \
-and electrical enclosures. Count how many distinct panels are visible.
-
-For EACH panel, assess the following criteria using only what is clearly visible. \
-Do not guess if something is not visible.
-
-Criterion 1 (SS 638 Clause 514 — Panel Condition):
-Panel doors are present, closed, and not visibly damaged. No exposed live parts visible.
-
-Criterion 2 (SS 638 Clause 514 — Labelling):
-Panel is visibly labelled. Warning signs and identification markings are visible on \
-panel faces.
-
-Criterion 3 (SS 638 Clause 514 — Panel Integrity):
-No visible signs of overheating, burn marks, corrosion, or physical damage on panel \
-surfaces.
-
-Also assess the floor area in front of the panels for working clearance.
-
-Respond in this EXACT format:
-
-DISTRIBUTION PANEL COUNT: [number]
-
-DISTRIBUTION PANEL 1:
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-DISTRIBUTION PANEL 2:
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 3: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-(repeat for each panel found)
-
-FLOOR / WORKING CLEARANCE:
-CRITERION 1 (SS 638 Clause 513 — Working Clearance): [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2 (SS 638 Clause 522 — Loose Items): [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
-SUMMARY: [Two to three sentences on the most significant findings.]
-""",
-
-    "Cable Support, Identification and Loose Cables": """
-You are an AI-assisted preliminary screening tool supporting electrical installation \
-inspection in Singapore under SS 638: Code of Practice for Electrical Installations \
-and EMA regulations.
-
-Carefully examine the image and identify all visible cable runs and cable groups. \
-Count how many distinct cable runs or bundles are visible.
-
-For EACH cable run, assess the following criteria using only what is clearly visible. \
-Do not guess if something is not visible.
-
-Criterion 1 (SS 638 Clause 522 — Cable Support):
-Cables appear secured to supports at visible intervals with no unsupported hanging \
-loops evident.
-
-Criterion 2 (SS 638 Clause 514 — Cable Identification):
-Cables appear colour-coded or labelled in a consistent and identifiable manner.
-
-Also check the floor area for loose or stray cables.
-
-Respond in this EXACT format:
-
-CABLE RUN COUNT: [number]
-
-CABLE RUN 1:
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-CABLE RUN 2:
-CRITERION 1: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-CRITERION 2: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE] — [one sentence]
-SEVERITY: [PASS / FLAG FOR REVIEW / FAIL / CANNOT DETERMINE]
-
-(repeat for each cable run found)
-
-FLOOR CABLES:
-LOOSE CABLES PRESENT: [YES / NO]
-SEVERITY: [FAIL / PASS]
-
-OVERALL RESULT: [PASS / FLAG FOR REVIEW / FAIL]
-SUMMARY: [Two to three sentences on the most significant findings.]
-"""
-}
 
 # ---------------------------------------------------------------------------
 # Helper: encode image to base64
@@ -298,7 +197,7 @@ def encode_image_to_base64(image: Image.Image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 # ---------------------------------------------------------------------------
-# Helper: call GPT-5.5 vision API
+# Helper: call GPT-5.5
 # ---------------------------------------------------------------------------
 def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
     if not OPENAI_AVAILABLE:
@@ -326,110 +225,98 @@ def call_gpt_vision(api_key: str, image_b64: str, prompt: str) -> str:
     return response.choices[0].message.content
 
 # ---------------------------------------------------------------------------
-# Helper: parse GPT-5.5 response into structured element list
+# Helper: flexible parser — scans response text for element mentions
+# and verdict keywords regardless of exact formatting
 # ---------------------------------------------------------------------------
+def extract_severity(text: str) -> str:
+    """Extract the strongest severity verdict from a block of text."""
+    text_up = text.upper()
+    if "FAIL" in text_up:
+        return "FAIL"
+    elif "FLAG FOR REVIEW" in text_up or "FLAG" in text_up:
+        return "FLAG FOR REVIEW"
+    elif "PASS" in text_up:
+        return "PASS"
+    return "CANNOT DETERMINE"
+
 def parse_response(response_text: str, category: str) -> list:
     """
-    Returns a list of dicts:
-    [{"element_type": "distribution_panel", "label": "Distribution Panel 1",
-      "count_index": 0, "total_count": 3, "severity": "FLAG FOR REVIEW",
-      "criteria": ["C1: PASS...", ...]}, ...]
+    Flexibly parses the response regardless of exact formatting.
+    Looks for lines mentioning element types and extracts verdict.
+    Returns list of element dicts for annotation.
     """
+    if not response_text or not response_text.strip():
+        return []
+
     elements = []
     lines = response_text.splitlines()
 
-    # Determine element type key from category
+    # Determine what element type to look for
     if "Cable Tray" in category:
-        primary_key  = "cable_tray"
-        primary_label = "Cable Tray"
-        count_pattern = r"CABLE TRAY COUNT\s*:\s*(\d+)"
-        block_pattern = r"CABLE TRAY (\d+)\s*:"
+        primary_pattern = re.compile(r"cable\s*tray\s*(\d+)", re.IGNORECASE)
+        primary_type    = "cable_tray"
+        primary_label   = "Cable Tray"
     elif "Distribution Panel" in category:
-        primary_key  = "distribution_panel"
-        primary_label = "Distribution Panel"
-        count_pattern = r"DISTRIBUTION PANEL COUNT\s*:\s*(\d+)"
-        block_pattern = r"DISTRIBUTION PANEL (\d+)\s*:"
+        primary_pattern = re.compile(r"distribution\s*panel\s*(\d+)", re.IGNORECASE)
+        primary_type    = "distribution_panel"
+        primary_label   = "Distribution Panel"
     else:
-        primary_key  = "cable_run"
-        primary_label = "Cable Run"
-        count_pattern = r"CABLE RUN COUNT\s*:\s*(\d+)"
-        block_pattern = r"CABLE RUN (\d+)\s*:"
+        primary_pattern = re.compile(r"cable\s*run\s*(\d+)", re.IGNORECASE)
+        primary_type    = "cable_run"
+        primary_label   = "Cable Run"
 
-    # Extract declared count
-    total_count = 1
+    floor_pattern = re.compile(
+        r"(floor|working\s*clearance|loose\s*cable)", re.IGNORECASE)
+    overall_pattern = re.compile(r"overall\s*:?\s*(pass|flag for review|fail)",
+                                 re.IGNORECASE)
+
+    found_indices = set()
+
     for line in lines:
-        m = re.search(count_pattern, line, re.IGNORECASE)
+        # Primary elements
+        m = primary_pattern.search(line)
         if m:
-            total_count = max(1, int(m.group(1)))
-            break
+            idx = int(m.group(1))
+            if idx not in found_indices:
+                found_indices.add(idx)
+                severity = extract_severity(line)
+                elements.append({
+                    "element_type": primary_type,
+                    "label": f"{primary_label} {idx}",
+                    "count_index": idx - 1,
+                    "severity": severity,
+                    "text": line.strip()
+                })
 
-    # Parse individual element blocks
-    current_elem = None
-    for line in lines:
-        line_s = line.strip()
+        # Floor / clearance
+        elif floor_pattern.search(line) and "overall" not in line.lower():
+            severity = extract_severity(line)
+            # Only add once
+            if not any(e["element_type"] == "floor" for e in elements):
+                elements.append({
+                    "element_type": "floor",
+                    "label": "Floor / Clearance",
+                    "count_index": 0,
+                    "severity": severity,
+                    "text": line.strip()
+                })
 
-        # New primary element block
-        bm = re.match(block_pattern, line_s, re.IGNORECASE)
-        if bm:
-            if current_elem:
-                elements.append(current_elem)
-            idx = int(bm.group(1)) - 1
-            current_elem = {
-                "element_type": primary_key,
-                "label": f"{primary_label} {bm.group(1)}",
-                "count_index": idx,
-                "total_count": total_count,
-                "severity": "CANNOT DETERMINE",
-                "criteria": []
-            }
-            continue
-
-        # Floor / clearance block
-        if re.match(r"FLOOR\s*/?\s*(WORKING CLEARANCE|CABLES)\s*:", line_s, re.IGNORECASE):
-            if current_elem:
-                elements.append(current_elem)
-            etype = "floor_clearance" if "CLEARANCE" in line_s.upper() else "loose_cables"
-            current_elem = {
-                "element_type": etype,
-                "label": "Floor / Working Clearance" if etype == "floor_clearance" else "Floor Cables",
-                "count_index": 0,
-                "total_count": 1,
-                "severity": "CANNOT DETERMINE",
-                "criteria": []
-            }
-            continue
-
-        if current_elem is None:
-            continue
-
-        # Severity line
-        if re.match(r"SEVERITY\s*:", line_s, re.IGNORECASE):
-            sev_raw = line_s.split(":", 1)[1].strip().upper()
-            if "NOT APPLICABLE" in sev_raw:
-                current_elem["severity"] = "NOT APPLICABLE"
-            elif "FAIL" in sev_raw:
-                current_elem["severity"] = "FAIL"
-            elif "FLAG" in sev_raw:
-                current_elem["severity"] = "FLAG FOR REVIEW"
-            elif "PASS" in sev_raw:
-                current_elem["severity"] = "PASS"
-            continue
-
-        # Loose cables present line
-        if re.match(r"LOOSE CABLES PRESENT\s*:", line_s, re.IGNORECASE):
-            val = line_s.split(":", 1)[1].strip().upper()
-            if "YES" in val:
-                current_elem["severity"] = "FAIL"
-            elif "NO" in val:
-                current_elem["severity"] = "PASS"
-            continue
-
-        # Criterion lines
-        if re.match(r"CRITERION\s+\d", line_s, re.IGNORECASE):
-            current_elem["criteria"].append(line_s)
-
-    if current_elem:
-        elements.append(current_elem)
+    # If no elements parsed but response is non-empty,
+    # create a single generic element so the box still renders
+    if not elements and response_text.strip():
+        overall = "CANNOT DETERMINE"
+        for line in lines:
+            om = overall_pattern.search(line)
+            if om:
+                overall = extract_severity(om.group(1))
+                break
+        elements.append({
+            "element_type": primary_type,
+            "label": primary_label,
+            "count_index": 0,
+            "severity": overall,
+            "text": response_text[:200]
+        })
 
     return elements
 
@@ -437,19 +324,22 @@ def parse_response(response_text: str, category: str) -> list:
 # Helper: extract overall result
 # ---------------------------------------------------------------------------
 def extract_overall_result(response_text: str) -> str:
+    if not response_text:
+        return "CANNOT DETERMINE"
     for line in response_text.splitlines():
-        if line.strip().upper().startswith("OVERALL RESULT:"):
-            val = line.split(":", 1)[1].strip().upper()
+        if re.search(r"overall", line, re.IGNORECASE):
+            val = line.upper()
             if "FAIL" in val:
                 return "FAIL"
             elif "FLAG" in val:
                 return "FLAG FOR REVIEW"
             elif "PASS" in val:
                 return "PASS"
-    return "CANNOT DETERMINE"
+    # Fall back to scanning full text
+    return extract_severity(response_text)
 
 # ---------------------------------------------------------------------------
-# Helper: draw rule-based boxes on image
+# Helper: draw rule-based boxes
 # ---------------------------------------------------------------------------
 def annotate_image(image: Image.Image, elements: list) -> Image.Image:
     w, h = image.size
@@ -459,7 +349,8 @@ def annotate_image(image: Image.Image, elements: list) -> Image.Image:
     font_size = max(16, w // 45)
     try:
         font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=font_size)
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            size=font_size)
         font_sm = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             size=max(13, w // 60))
@@ -467,8 +358,7 @@ def annotate_image(image: Image.Image, elements: list) -> Image.Image:
         font = ImageFont.load_default()
         font_sm = font
 
-    # Group elements by type to calculate column layouts
-    from collections import defaultdict
+    # Group by element type for column layout
     type_groups = defaultdict(list)
     for elem in elements:
         type_groups[elem["element_type"]].append(elem)
@@ -477,46 +367,49 @@ def annotate_image(image: Image.Image, elements: list) -> Image.Image:
         count = len(group)
         boxes = compute_boxes(etype, count, w, h)
 
-        for i, (elem, box) in enumerate(zip(group, boxes)):
+        for elem, box in zip(group, boxes):
             x0, y0, x1, y1 = box
             severity = elem["severity"]
 
             fill   = SEVERITY_FILL.get(severity,   (150, 150, 150, 40))
             border = SEVERITY_BORDER.get(severity, (120, 120, 120, 200))
-            tcolour = SEVERITY_TEXT.get(severity,  (80,  80,  80))
 
-            # Main box
-            draw.rectangle([x0, y0, x1, y1], fill=fill, outline=border, width=3)
+            draw.rectangle([x0, y0, x1, y1],
+                           fill=fill, outline=border, width=3)
 
-            # Label tag at top of box
+            # Label tag
             label_text = f"{elem['label']}  |  {severity}"
             try:
                 tb = draw.textbbox((0, 0), label_text, font=font_sm)
                 tw = tb[2] - tb[0]
                 th = tb[3] - tb[1]
             except Exception:
-                tw = len(label_text) * 7
-                th = 14
+                tw, th = len(label_text) * 7, 14
 
-            pad = 5
-            lx0 = x0
-            ly0 = max(0, y0 - th - pad * 2)
-            lx1 = min(w, x0 + tw + pad * 2)
-            ly1 = y0
+            pad  = 5
+            lx0  = x0
+            ly0  = max(0, y0 - th - pad * 2)
+            lx1  = min(w, x0 + tw + pad * 2)
+            ly1  = y0
 
             tag_bg = border[:3] + (210,)
             draw.rectangle([lx0, ly0, lx1, ly1], fill=tag_bg)
             draw.text((lx0 + pad, ly0 + pad), label_text,
                       fill=(255, 255, 255), font=font_sm)
 
-    base = image.convert("RGBA")
+    base     = image.convert("RGBA")
     combined = Image.alpha_composite(base, overlay)
     return combined.convert("RGB")
 
 # ---------------------------------------------------------------------------
-# Helper: render full results to screen
+# Helper: render results to screen
 # ---------------------------------------------------------------------------
 def render_results(image: Image.Image, response_text: str, cat: str):
+    if not response_text or not response_text.strip():
+        st.error("The model returned an empty response. Please try again.")
+        st.image(image, use_container_width=True)
+        return "CANNOT DETERMINE"
+
     elements = parse_response(response_text, cat)
     overall  = extract_overall_result(response_text)
 
@@ -527,8 +420,7 @@ def render_results(image: Image.Image, response_text: str, cat: str):
                  caption="Annotated output — colour-coded by element and severity",
                  use_container_width=True)
     else:
-        st.image(image, caption="No elements parsed from response",
-                 use_container_width=True)
+        st.image(image, caption="Uploaded photograph", use_container_width=True)
 
     # Overall result banner
     if overall == "PASS":
@@ -540,7 +432,7 @@ def render_results(image: Image.Image, response_text: str, cat: str):
     else:
         st.info(f"Overall Result: {overall}")
 
-    # Elements summary table
+    # Element summary
     if elements:
         st.subheader("Detected Elements")
         for elem in elements:
@@ -556,28 +448,21 @@ def render_results(image: Image.Image, response_text: str, cat: str):
             else:
                 c2.info(sev)
 
-            # Show criteria detail under each element
-            if elem["criteria"]:
-                with st.expander(f"Criteria detail — {elem['label']}"):
-                    for cline in elem["criteria"]:
-                        st.write(cline)
-
-    # Full raw report
-    with st.expander("Full Assessment Report", expanded=False):
-        st.text(response_text)
+    # Full report
+    with st.expander("Full Assessment Report", expanded=True):
+        st.write(response_text)
 
     return overall
 
 # ---------------------------------------------------------------------------
 # Helper: extract frames from video
 # ---------------------------------------------------------------------------
-def extract_frames(video_path: str, interval_seconds: int, max_frames: int) -> list:
+def extract_frames(video_path: str, interval_seconds: int,
+                   max_frames: int) -> list:
     if not CV2_AVAILABLE:
         return []
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps == 0:
-        fps = 25
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
     frame_step = int(fps * interval_seconds)
     frames = []
     frame_index = 0
@@ -614,7 +499,8 @@ if input_mode == "Single Photograph":
                 with st.spinner("Sending to GPT-5.5 for analysis..."):
                     try:
                         image_b64 = encode_image_to_base64(image)
-                        response_text = call_gpt_vision(api_key, image_b64, prompt_text)
+                        response_text = call_gpt_vision(
+                            api_key, image_b64, prompt_text)
                         render_results(image, response_text, category)
                     except Exception as e:
                         st.error(f"API request failed: {e}")
@@ -647,9 +533,11 @@ elif input_mode == "Video Walkthrough":
                     if not frames:
                         st.error("No frames could be extracted from the video.")
                     else:
-                        st.info(f"{len(frames)} frame(s) extracted. Sending to GPT-5.5...")
+                        st.info(
+                            f"{len(frames)} frame(s) extracted. "
+                            "Sending to GPT-5.5...")
                         progress = st.progress(0)
-                        results = []
+                        results  = []
 
                         for i, (frame_image, timestamp) in enumerate(frames):
                             with st.spinner(
@@ -657,32 +545,37 @@ elif input_mode == "Video Walkthrough":
                                 f"(at {timestamp:.1f}s)..."
                             ):
                                 try:
-                                    image_b64 = encode_image_to_base64(frame_image)
+                                    image_b64 = encode_image_to_base64(
+                                        frame_image)
                                     response_text = call_gpt_vision(
                                         api_key, image_b64, prompt_text)
                                     results.append({
-                                        "frame": i + 1,
+                                        "frame":     i + 1,
                                         "timestamp": timestamp,
-                                        "image": frame_image,
-                                        "overall": extract_overall_result(response_text),
-                                        "report": response_text
+                                        "image":     frame_image,
+                                        "overall":   extract_overall_result(
+                                            response_text),
+                                        "report":    response_text
                                     })
                                 except Exception as e:
                                     results.append({
-                                        "frame": i + 1,
+                                        "frame":     i + 1,
                                         "timestamp": timestamp,
-                                        "image": frame_image,
-                                        "overall": "ERROR",
-                                        "report": str(e)
+                                        "image":     frame_image,
+                                        "overall":   "ERROR",
+                                        "report":    str(e)
                                     })
                             progress.progress((i + 1) / len(frames))
 
                         # Session summary
                         st.subheader("Session Summary")
                         total  = len(results)
-                        fails  = sum(1 for r in results if r["overall"] == "FAIL")
-                        flags  = sum(1 for r in results if r["overall"] == "FLAG FOR REVIEW")
-                        passes = sum(1 for r in results if r["overall"] == "PASS")
+                        fails  = sum(1 for r in results
+                                     if r["overall"] == "FAIL")
+                        flags  = sum(1 for r in results
+                                     if r["overall"] == "FLAG FOR REVIEW")
+                        passes = sum(1 for r in results
+                                     if r["overall"] == "PASS")
 
                         col1, col2, col3, col4 = st.columns(4)
                         col1.metric("Frames Analysed", total)
@@ -691,19 +584,25 @@ elif input_mode == "Video Walkthrough":
                         col4.metric("Fail", fails)
 
                         if fails > 0:
-                            st.error("Worst-case result across session: FAIL")
+                            st.error(
+                                "Worst-case result across session: FAIL")
                         elif flags > 0:
-                            st.warning("Worst-case result across session: FLAG FOR REVIEW")
+                            st.warning(
+                                "Worst-case result across session: "
+                                "FLAG FOR REVIEW")
                         else:
-                            st.success("Worst-case result across session: PASS")
+                            st.success(
+                                "Worst-case result across session: PASS")
 
                         st.subheader("Frame-by-Frame Results")
                         for r in results:
                             with st.expander(
-                                f"Frame {r['frame']} | t={r['timestamp']:.1f}s | "
+                                f"Frame {r['frame']} | "
+                                f"t={r['timestamp']:.1f}s | "
                                 f"Result: {r['overall']}"
                             ):
-                                render_results(r["image"], r["report"], category)
+                                render_results(
+                                    r["image"], r["report"], category)
 
                     os.unlink(tmp_path)
 
