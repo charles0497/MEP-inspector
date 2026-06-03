@@ -192,7 +192,7 @@ def call_claude_vision(api_key: str, image_b64: str, prompt: str) -> str:
     client = anthropic.Anthropic(api_key=api_key)
 
     message = client.messages.create(
-        model="claude-opus-4-7",
+        model="claude-opus-4-8",
         max_tokens=2000,
         messages=[
             {
