@@ -95,11 +95,11 @@ SEVERITY_BORDER = {
 PROMPTS = {
     "Cable Tray Condition and Fill Level": """You are assisting with a preliminary electrical installation inspection under SS 638 (Singapore Code of Practice for Electrical Installations).
 
-Look at this construction site photograph. Identify all visible cable trays and trunking runs. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+Look at this construction site photograph. Identify all visible cable trays and trunking runs. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE. Do not guess if something is not clearly visible.
 
-1. Fill level — does the tray appear to exceed 40% fill of its cross-section?
-2. Tray condition — any visible crushing, cracking, or deformation?
-3. Earth conductor — are yellow-green earth continuity conductors visible running alongside the power cables?
+1. Fill level — does the tray appear to exceed approximately 40% fill of its cross-section? (Industry threshold per IEC 61537, referenced by SS 638 Clause 521.6.)
+2. Tray condition — any visible crushing, cracking, or deformation? (SS 638 Clause 522.6.1.)
+3. Earth continuity conductor — is a green-and-yellow conductor visible running alongside the live conductors, or in their immediate proximity? (SS 638 Clauses 514.4.2L and 543.6.1.)
 
 Also note whether any loose cables are lying on the floor.
 
@@ -114,13 +114,11 @@ At the end write:
 
     "Distribution Panel Condition": """You are assisting with a preliminary electrical installation inspection under SS 638 (Singapore Code of Practice for Electrical Installations).
 
-Look at this construction site photograph. Identify all visible distribution panels and switchboards. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+Look at this construction site photograph. Identify all visible distribution panels and switchboards. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE. Do not guess if something is not clearly visible.
 
-1. Panel condition — are doors closed, undamaged, with no exposed live parts?
-2. Labelling — are warning signs and identification markings visible on the panel face?
-3. Integrity — any visible burn marks, corrosion, or physical damage?
-
-Also check the floor area in front of panels for working clearance and loose items.
+1. Door condition and labelling — are doors present, closed, and labelled with their purpose, and are voltage warning notices and isolation notices visible where required? (SS 638 Clauses 514.1.1, 514.10 and 514.11.)
+2. Accessibility — is the panel arranged so as to facilitate operation, inspection and maintenance, with clear access in front of it? (SS 638 Clause 513.1.)
+3. Exposed live parts — if a door can be opened without a tool, are conductive parts behind an insulating barrier with no exposed live terminals? (SS 638 Clause 412.2.2.3.)
 
 Count how many panels you can see. Then for each one write:
 - "Distribution Panel [N]: [your findings and verdict]"
@@ -133,12 +131,12 @@ At the end write:
 
     "Cable Support, Identification and Loose Cables": """You are assisting with a preliminary electrical installation inspection under SS 638 (Singapore Code of Practice for Electrical Installations).
 
-Look at this construction site photograph. Identify all visible cable runs and cable groups. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE:
+Look at this construction site photograph. Identify all visible cable runs and cable groups. For each one, assess the following and give a verdict of PASS, FLAG FOR REVIEW, FAIL, or CANNOT DETERMINE. Do not guess if something is not clearly visible.
 
-1. Cable support — are cables secured at intervals with no unsupported hanging loops?
-2. Cable identification — are cables colour-coded or labelled consistently?
+1. Cable support and routing — are cables secured at supports with no unsupported hanging loops, and routed so as to be protected against mechanical damage? (SS 638 Clauses 522.6.1 and 611.3(iii).)
+2. Cable identification — are cables identified by colour according to SS 638 Table 51, or by lettering and numbering, in a consistent and legible manner? (SS 638 Clauses 514.3, 514.4 and 514.5.)
 
-Also check whether any loose or stray cables are lying on the floor.
+Also check whether any non-sheathed or loose cables are lying on the floor or outside any conduit, ducting or trunking, as Clause 521.10.1 requires fixed wiring to be enclosed.
 
 Count how many distinct cable runs you can see. Then for each one write:
 - "Cable Run [N]: [your findings and verdict]"
