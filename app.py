@@ -181,7 +181,7 @@ def encode_image_to_base64(image: Image.Image) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 # ---------------------------------------------------------------------------
-# Helper: call Claude Opus 4.7
+# Helper: call Claude Opus 4.8
 # ---------------------------------------------------------------------------
 def call_claude_vision(api_key: str, image_b64: str, prompt: str) -> str:
     if not ANTHROPIC_AVAILABLE:
@@ -502,7 +502,7 @@ if input_mode == "Single Photograph":
             if not api_key:
                 st.error("Please enter your Anthropic API key in the sidebar.")
             else:
-                with st.spinner("Sending to Claude Opus 4.7 for analysis..."):
+                with st.spinner("Sending to Claude Opus 4.8 for analysis..."):
                     try:
                         image_b64     = encode_image_to_base64(image)
                         response_text = call_claude_vision(
@@ -544,7 +544,7 @@ elif input_mode == "Video Walkthrough":
                     else:
                         st.info(
                             f"{len(frames)} frame(s) extracted. "
-                            "Sending to Claude Opus 4.7...")
+                            "Sending to Claude Opus 4.8...")
                         progress = st.progress(0)
                         results  = []
 
