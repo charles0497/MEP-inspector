@@ -101,13 +101,14 @@ Scope 2: Visual Inspection covers three defined categories
                These categories were selected based on their suitability for visual assessment. This 
 selection is covered in Section 4.1. 
 Scope 3: the input for the prototype is limited to site photos and recorded video. Real-time 
-video and live camera feed analysis are outside of the scope of this project.
-
+video and live camera feed analysis are outside of the scope of this project. 
 Scope 4: The AI assessment prototype is a preliminary screening tool only. It does not replace 
 a formal electrical inspection and cannot substitute for the professional judgement of a 
-licensed electrical engineer as required under SS 638 standard and EMA regulations
+licensed electrical engineer as required under SS 638 standard and EMA regulations 
 Scope 5: Testing of the prototype will use site photos and video collected from construction 
-sites, subject to data access permissions. 
+sites, subject to data access permissions.
+
+
 ---
 
 ## Project context
