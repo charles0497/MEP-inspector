@@ -106,7 +106,6 @@ video and live camera feed analysis are outside of the scope of this project.
 Scope 4: The AI assessment prototype is a preliminary screening tool only. It does not replace 
 a formal electrical inspection and cannot substitute for the professional judgement of a 
 licensed electrical engineer as required under SS 638 standard and EMA regulations
-
 Scope 5: Testing of the prototype will use site photos and video collected from construction 
 sites, subject to data access permissions. 
 ---
