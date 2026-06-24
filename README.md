@@ -92,20 +92,20 @@ The model's confidence levels are indicative only and are not calibrated probabi
 - Results must be verified by a qualified electrical engineer before any compliance decision is made.
 - This prototype was evaluated against a controlled test set; performance on unseen site conditions may vary.
 The following scopes define the boundaries within which this project is conducted: 
--Scope 1: The prototype will assess electrical installations only. Other MEP systems such as 
+- Scope 1: The prototype will assess electrical installations only. Other MEP systems such as 
 mechanical HVAC ductwork and plumbing pipework are excluded from this project. 
--Scope 2: Visual Inspection covers three defined categories 
+- Scope 2: Visual Inspection covers three defined categories 
 1) Cable tray condition and fill 
 2) Distribution panel condition 
 3) Cable support, identification and loose cables identification 
                These categories were selected based on their suitability for visual assessment. This 
 selection is covered in Section 4.1. 
--Scope 3: the input for the prototype is limited to site photos and recorded video. Real-time 
+- Scope 3: the input for the prototype is limited to site photos and recorded video. Real-time 
 video and live camera feed analysis are outside of the scope of this project. 
--Scope 4: The AI assessment prototype is a preliminary screening tool only. It does not replace 
+- Scope 4: The AI assessment prototype is a preliminary screening tool only. It does not replace 
 a formal electrical inspection and cannot substitute for the professional judgement of a 
 licensed electrical engineer as required under SS 638 standard and EMA regulations 
--Scope 5: Testing of the prototype will use site photos and video collected from construction 
+- Scope 5: Testing of the prototype will use site photos and video collected from construction 
 sites, subject to data access permissions.
 
 
